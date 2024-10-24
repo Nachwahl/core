@@ -1,12 +1,14 @@
 """Config Flow for PlayStation 4."""
+
 from collections import OrderedDict
+from typing import Any
 
 from pyps4_2ndscreen.errors import CredentialTimeout
 from pyps4_2ndscreen.helpers import Helper
 from pyps4_2ndscreen.media_art import COUNTRIES
 import voluptuous as vol
 
-from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import (
     CONF_CODE,
     CONF_HOST,
@@ -15,9 +17,16 @@ from homeassistant.const import (
     CONF_REGION,
     CONF_TOKEN,
 )
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import location
 
-from .const import CONFIG_ENTRY_VERSION, DEFAULT_ALIAS, DEFAULT_NAME, DOMAIN
+from .const import (
+    CONFIG_ENTRY_VERSION,
+    COUNTRYCODE_NAMES,
+    DEFAULT_ALIAS,
+    DEFAULT_NAME,
+    DOMAIN,
+)
 
 CONF_MODE = "Config Mode"
 CONF_AUTO = "Auto Discover"
@@ -31,24 +40,26 @@ PORT_MSG = {UDP_PORT: "port_987_bind_error", TCP_PORT: "port_997_bind_error"}
 PIN_LENGTH = 8
 
 
-class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
+class PlayStation4FlowHandler(ConfigFlow, domain=DOMAIN):
     """Handle a PlayStation 4 config flow."""
 
     VERSION = CONFIG_ENTRY_VERSION
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the config flow."""
         self.helper = Helper()
-        self.creds = None
+        self.creds: str | None = None
         self.name = None
         self.host = None
         self.region = None
-        self.pin = None
+        self.pin: str | None = None
         self.m_device = None
-        self.location = None
-        self.device_list = []
+        self.location: location.LocationInfo | None = None
+        self.device_list: list[str] = []
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Handle a user config flow."""
         # Check if able to bind to ports: UDP 987, TCP 997.
         ports = PORT_MSG.keys()
@@ -58,7 +69,9 @@ class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason=reason)
         return await self.async_step_creds()
 
-    async def async_step_creds(self, user_input=None):
+    async def async_step_creds(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Return PS4 credentials from 2nd Screen App."""
         errors = {}
         if user_input is not None:
@@ -74,7 +87,9 @@ class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(step_id="creds", errors=errors)
 
-    async def async_step_mode(self, user_input=None):
+    async def async_step_mode(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Prompt for mode."""
         errors = {}
         mode = [CONF_AUTO, CONF_MANUAL]
@@ -82,15 +97,14 @@ class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input[CONF_MODE] == CONF_MANUAL:
                 try:
-                    device = user_input[CONF_IP_ADDRESS]
-                    if device:
+                    if device := user_input[CONF_IP_ADDRESS]:
                         self.m_device = device
                 except KeyError:
                     errors[CONF_IP_ADDRESS] = "no_ipaddress"
             if not errors:
                 return await self.async_step_link()
 
-        mode_schema = OrderedDict()
+        mode_schema = OrderedDict[vol.Marker, Any]()
         mode_schema[vol.Required(CONF_MODE, default=CONF_AUTO)] = vol.In(list(mode))
         mode_schema[vol.Optional(CONF_IP_ADDRESS)] = str
 
@@ -98,7 +112,9 @@ class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="mode", data_schema=vol.Schema(mode_schema), errors=errors
         )
 
-    async def async_step_link(self, user_input=None):
+    async def async_step_link(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Prompt user input. Create or edit entry."""
         regions = sorted(COUNTRIES.keys())
         default_region = None
@@ -118,7 +134,7 @@ class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             self.device_list = [device["host-ip"] for device in devices]
 
             # Check that devices found aren't configured per account.
-            entries = self.hass.config_entries.async_entries(DOMAIN)
+            entries = self._async_current_entries()
             if entries:
                 # Retrieve device data from all entries if creds match.
                 conf_devices = [
@@ -175,15 +191,15 @@ class PlayStation4FlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         # Try to find region automatically.
         if not self.location:
             self.location = await location.async_detect_location_info(
-                self.hass.helpers.aiohttp_client.async_get_clientsession()
+                async_get_clientsession(self.hass)
             )
         if self.location:
-            country = self.location.country_name
+            country = COUNTRYCODE_NAMES.get(self.location.country_code)
             if country in COUNTRIES:
                 default_region = country
 
         # Show User Input form.
-        link_schema = OrderedDict()
+        link_schema = OrderedDict[vol.Marker, Any]()
         link_schema[vol.Required(CONF_IP_ADDRESS)] = vol.In(list(self.device_list))
         link_schema[vol.Required(CONF_REGION, default=default_region)] = vol.In(
             list(regions)

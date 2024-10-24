@@ -1,38 +1,57 @@
 # ScreenLogic Services
 set_color_mode:
-  name: Set Color Mode
-  description: Sets the color mode for all color-capable lights attached to this ScreenLogic gateway.
-  target:
-    device:
-      integration: screenlogic
   fields:
-    color_mode:
-      name: Color Mode
-      description: The ScreenLogic color mode to set
+    config_entry:
       required: true
-      example: "romance"
+      selector:
+        config_entry:
+          integration: screenlogic
+    color_mode:
+      required: true
       selector:
         select:
           options:
             - all_off
             - all_on
-            - color_set
-            - color_sync
-            - color_swim
-            - party
-            - romance
-            - caribbean
             - american
-            - sunset
+            - blue
+            - caribbean
+            - color_set
+            - color_swim
+            - color_sync
+            - green
+            - hold
+            - magenta
+            - next_mode
+            - party
+            - recall
+            - red
+            - reset
+            - romance
             - royal
             - save
-            - recall
-            - blue
-            - green
-            - red
-            - white
-            - magenta
+            - sunset
             - thumper
-            - next_mode
-            - reset
-            - hold
+            - white
+start_super_chlorination:
+  fields:
+    config_entry:
+      required: true
+      selector:
+        config_entry:
+          integration: screenlogic
+    runtime:
+      default: 24
+      selector:
+        number:
+          min: 0
+          max: 72
+          unit_of_measurement: hours
+          mode: slider
+stop_super_chlorination:
+  fields:
+    config_entry:
+      required: true
+      selector:
+        config_entry:
+          integration: screenlogic

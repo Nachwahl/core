@@ -1,11 +1,14 @@
-"""Tests for the Freebox config flow."""
-from unittest.mock import Mock, patch
+"""Tests for the Freebox init."""
+
+from unittest.mock import ANY, Mock, patch
+
+from pytest_unordered import unordered
 
 from homeassistant.components.device_tracker import DOMAIN as DT_DOMAIN
-from homeassistant.components.freebox.const import DOMAIN as DOMAIN, SERVICE_REBOOT
+from homeassistant.components.freebox.const import DOMAIN, SERVICE_REBOOT
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.switch import DOMAIN as SWITCH_DOMAIN
-from homeassistant.config_entries import ENTRY_STATE_LOADED, ENTRY_STATE_NOT_LOADED
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST, CONF_PORT, STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
@@ -15,7 +18,7 @@ from .const import MOCK_HOST, MOCK_PORT
 from tests.common import MockConfigEntry
 
 
-async def test_setup(hass: HomeAssistant, router: Mock):
+async def test_setup(hass: HomeAssistant, router: Mock) -> None:
     """Test setup of integration."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -25,7 +28,7 @@ async def test_setup(hass: HomeAssistant, router: Mock):
     entry.add_to_hass(hass)
     assert await async_setup_component(hass, DOMAIN, {})
     await hass.async_block_till_done()
-    assert hass.config_entries.async_entries() == [entry]
+    assert hass.config_entries.async_entries() == unordered([entry, ANY])
 
     assert router.call_count == 1
     assert router().open.call_count == 1
@@ -44,9 +47,8 @@ async def test_setup(hass: HomeAssistant, router: Mock):
         mock_service.assert_called_once()
 
 
-async def test_setup_import(hass: HomeAssistant, router: Mock):
+async def test_setup_import(hass: HomeAssistant, router: Mock) -> None:
     """Test setup of integration from import."""
-    await async_setup_component(hass, "persistent_notification", {})
 
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -58,7 +60,7 @@ async def test_setup_import(hass: HomeAssistant, router: Mock):
         hass, DOMAIN, {DOMAIN: {CONF_HOST: MOCK_HOST, CONF_PORT: MOCK_PORT}}
     )
     await hass.async_block_till_done()
-    assert hass.config_entries.async_entries() == [entry]
+    assert hass.config_entries.async_entries() == unordered([entry, ANY])
 
     assert router.call_count == 1
     assert router().open.call_count == 1
@@ -66,7 +68,7 @@ async def test_setup_import(hass: HomeAssistant, router: Mock):
     assert hass.services.has_service(DOMAIN, SERVICE_REBOOT)
 
 
-async def test_unload_remove(hass: HomeAssistant, router: Mock):
+async def test_unload_remove(hass: HomeAssistant, router: Mock) -> None:
     """Test unload and remove of integration."""
     entity_id_dt = f"{DT_DOMAIN}.freebox_server_r2"
     entity_id_sensor = f"{SENSOR_DOMAIN}.freebox_download_speed"
@@ -85,7 +87,7 @@ async def test_unload_remove(hass: HomeAssistant, router: Mock):
     assert await async_setup_component(hass, DOMAIN, {}) is True
     await hass.async_block_till_done()
 
-    assert entry.state == ENTRY_STATE_LOADED
+    assert entry.state is ConfigEntryState.LOADED
     state_dt = hass.states.get(entity_id_dt)
     assert state_dt
     state_sensor = hass.states.get(entity_id_sensor)
@@ -95,7 +97,7 @@ async def test_unload_remove(hass: HomeAssistant, router: Mock):
 
     await hass.config_entries.async_unload(entry.entry_id)
 
-    assert entry.state == ENTRY_STATE_NOT_LOADED
+    assert entry.state is ConfigEntryState.NOT_LOADED
     state_dt = hass.states.get(entity_id_dt)
     assert state_dt.state == STATE_UNAVAILABLE
     state_sensor = hass.states.get(entity_id_sensor)
@@ -110,7 +112,7 @@ async def test_unload_remove(hass: HomeAssistant, router: Mock):
     await hass.async_block_till_done()
 
     assert router().close.call_count == 1
-    assert entry.state == ENTRY_STATE_NOT_LOADED
+    assert entry.state is ConfigEntryState.NOT_LOADED
     state_dt = hass.states.get(entity_id_dt)
     assert state_dt is None
     state_sensor = hass.states.get(entity_id_sensor)

@@ -1,13 +1,16 @@
 """Config flow for Rituals Perfume Genie integration."""
+
+from __future__ import annotations
+
 import logging
+from typing import Any
 
 from aiohttp import ClientResponseError
 from pyrituals import Account, AuthenticationException
 import voluptuous as vol
 
-from homeassistant import config_entries
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import ACCOUNT_HASH, DOMAIN
@@ -22,12 +25,14 @@ DATA_SCHEMA = vol.Schema(
 )
 
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class RitualsPerfumeGenieConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Rituals Perfume Genie."""
 
     VERSION = 1
 
-    async def async_step_user(self, user_input=None) -> FlowResult:
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA)
@@ -40,19 +45,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             await account.authenticate()
         except ClientResponseError:
+            _LOGGER.exception("Unexpected response")
             errors["base"] = "cannot_connect"
         except AuthenticationException:
             errors["base"] = "invalid_auth"
-        except Exception:  # pylint: disable=broad-except
+        except Exception:
             _LOGGER.exception("Unexpected exception")
             errors["base"] = "unknown"
         else:
-            await self.async_set_unique_id(account.data[CONF_EMAIL])
+            await self.async_set_unique_id(account.email)
             self._abort_if_unique_id_configured()
 
             return self.async_create_entry(
-                title=account.data[CONF_EMAIL],
-                data={ACCOUNT_HASH: account.data[ACCOUNT_HASH]},
+                title=account.email,
+                data={ACCOUNT_HASH: account.account_hash},
             )
 
         return self.async_show_form(

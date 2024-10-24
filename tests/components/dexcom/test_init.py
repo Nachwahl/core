@@ -1,16 +1,19 @@
 """Test the Dexcom config flow."""
+
 from unittest.mock import patch
 
 from pydexcom import AccountError, SessionError
 
 from homeassistant.components.dexcom.const import DOMAIN
-from homeassistant.config_entries import ENTRY_STATE_LOADED, ENTRY_STATE_NOT_LOADED
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant
+
+from . import CONFIG, init_integration
 
 from tests.common import MockConfigEntry
-from tests.components.dexcom import CONFIG, init_integration
 
 
-async def test_setup_entry_account_error(hass):
+async def test_setup_entry_account_error(hass: HomeAssistant) -> None:
     """Test entry setup failed due to account error."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -30,7 +33,7 @@ async def test_setup_entry_account_error(hass):
     assert result is False
 
 
-async def test_setup_entry_session_error(hass):
+async def test_setup_entry_session_error(hass: HomeAssistant) -> None:
     """Test entry setup failed due to session error."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -50,15 +53,15 @@ async def test_setup_entry_session_error(hass):
     assert result is False
 
 
-async def test_unload_entry(hass):
+async def test_unload_entry(hass: HomeAssistant) -> None:
     """Test successful unload of entry."""
     entry = await init_integration(hass)
 
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1
-    assert entry.state == ENTRY_STATE_LOADED
+    assert entry.state is ConfigEntryState.LOADED
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
 
-    assert entry.state == ENTRY_STATE_NOT_LOADED
+    assert entry.state is ConfigEntryState.NOT_LOADED
     assert not hass.data.get(DOMAIN)

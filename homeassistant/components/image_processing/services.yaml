@@ -1,5 +1,6 @@
 # Describes the format for available image processing services
 
 scan:
-  description: Process an image immediately
   target:
+    entity:
+      domain: image_processing

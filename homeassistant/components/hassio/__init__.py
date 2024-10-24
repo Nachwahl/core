@@ -1,53 +1,121 @@
 """Support for Hass.io."""
+
 from __future__ import annotations
 
-from datetime import timedelta
+import asyncio
+from contextlib import suppress
+from datetime import datetime
 import logging
 import os
-from typing import Any
+import re
+from typing import Any, NamedTuple
 
 import voluptuous as vol
 
 from homeassistant.auth.const import GROUP_ID_ADMIN
-from homeassistant.components.homeassistant import SERVICE_CHECK_CONFIG
-import homeassistant.config as conf_util
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components import panel_custom
+from homeassistant.components.homeassistant import async_set_stop_handler
+from homeassistant.components.http import StaticPathConfig
+from homeassistant.config_entries import SOURCE_SYSTEM, ConfigEntry
 from homeassistant.const import (
     ATTR_NAME,
-    ATTR_SERVICE,
     EVENT_CORE_CONFIG_UPDATE,
-    SERVICE_HOMEASSISTANT_RESTART,
-    SERVICE_HOMEASSISTANT_STOP,
+    HASSIO_USER_NAME,
+    Platform,
 )
-from homeassistant.core import DOMAIN as HASS_DOMAIN, Config, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
-import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.device_registry import DeviceRegistry, async_get_registry
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.core import (
+    Event,
+    HassJob,
+    HomeAssistant,
+    ServiceCall,
+    async_get_hass_or_none,
+    callback,
+)
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    discovery_flow,
+)
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import bind_hass
-from homeassistant.util.dt import utcnow
+from homeassistant.util.async_ import create_eager_task
+from homeassistant.util.dt import now
 
+# config_flow, diagnostics, system_health, and entity platforms are imported to
+# ensure other dependencies that wait for hassio are not waiting
+# for hassio to import its platforms
+from . import (  # noqa: F401
+    binary_sensor,
+    config_flow,
+    diagnostics,
+    sensor,
+    system_health,
+    update,
+)
+from .addon_manager import AddonError, AddonInfo, AddonManager, AddonState  # noqa: F401
 from .addon_panel import async_setup_addon_panel
 from .auth import async_setup_auth_view
 from .const import (
+    ADDONS_COORDINATOR,
     ATTR_ADDON,
     ATTR_ADDONS,
-    ATTR_DISCOVERY,
+    ATTR_COMPRESSED,
     ATTR_FOLDERS,
     ATTR_HOMEASSISTANT,
+    ATTR_HOMEASSISTANT_EXCLUDE_DATABASE,
     ATTR_INPUT,
+    ATTR_LOCATION,
     ATTR_PASSWORD,
-    ATTR_REPOSITORY,
     ATTR_SLUG,
-    ATTR_SNAPSHOT,
-    ATTR_URL,
-    ATTR_VERSION,
+    DATA_CORE_INFO,
+    DATA_HOST_INFO,
+    DATA_INFO,
+    DATA_KEY_SUPERVISOR_ISSUES,
+    DATA_NETWORK_INFO,
+    DATA_OS_INFO,
+    DATA_STORE,
+    DATA_SUPERVISOR_INFO,
     DOMAIN,
+    HASSIO_UPDATE_INTERVAL,
 )
-from .discovery import async_setup_discovery_view
-from .handler import HassIO, HassioAPIError, api_data
+from .coordinator import (
+    HassioDataUpdateCoordinator,
+    get_addons_changelogs,  # noqa: F401
+    get_addons_info,
+    get_addons_stats,  # noqa: F401
+    get_core_info,  # noqa: F401
+    get_core_stats,  # noqa: F401
+    get_host_info,  # noqa: F401
+    get_info,  # noqa: F401
+    get_issues_info,  # noqa: F401
+    get_os_info,
+    get_supervisor_info,  # noqa: F401
+    get_supervisor_stats,  # noqa: F401
+)
+from .discovery import HassioServiceInfo, async_setup_discovery_view  # noqa: F401
+from .handler import (  # noqa: F401
+    HassIO,
+    HassioAPIError,
+    async_create_backup,
+    async_get_addon_discovery_info,
+    async_get_green_settings,
+    async_get_yellow_settings,
+    async_reboot_host,
+    async_set_green_settings,
+    async_set_yellow_settings,
+    async_update_core,
+    async_update_diagnostics,
+    async_update_os,
+    async_update_supervisor,
+    get_supervisor_client,
+)
 from .http import HassIOView
 from .ingress import async_setup_ingress_view
+from .issues import SupervisorIssues
 from .websocket_api import async_load_websocket_api
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,7 +123,10 @@ _LOGGER = logging.getLogger(__name__)
 
 STORAGE_KEY = DOMAIN
 STORAGE_VERSION = 1
-PLATFORMS = ["binary_sensor", "sensor"]
+# If new platforms are added, be sure to import them above
+# so we do not make other components that depend on hassio
+# wait for the import of the platforms
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.SENSOR, Platform.UPDATE]
 
 CONF_FRONTEND_REPO = "development_repo"
 
@@ -64,16 +135,6 @@ CONFIG_SCHEMA = vol.Schema(
     extra=vol.ALLOW_EXTRA,
 )
 
-
-DATA_CORE_INFO = "hassio_core_info"
-DATA_HOST_INFO = "hassio_host_info"
-DATA_INFO = "hassio_info"
-DATA_OS_INFO = "hassio_os_info"
-DATA_SUPERVISOR_INFO = "hassio_supervisor_info"
-HASSIO_UPDATE_INTERVAL = timedelta(minutes=55)
-
-ADDONS_COORDINATOR = "hassio_addons_coordinator"
-
 SERVICE_ADDON_START = "addon_start"
 SERVICE_ADDON_STOP = "addon_stop"
 SERVICE_ADDON_RESTART = "addon_restart"
@@ -81,240 +142,136 @@ SERVICE_ADDON_UPDATE = "addon_update"
 SERVICE_ADDON_STDIN = "addon_stdin"
 SERVICE_HOST_SHUTDOWN = "host_shutdown"
 SERVICE_HOST_REBOOT = "host_reboot"
-SERVICE_SNAPSHOT_FULL = "snapshot_full"
-SERVICE_SNAPSHOT_PARTIAL = "snapshot_partial"
+SERVICE_BACKUP_FULL = "backup_full"
+SERVICE_BACKUP_PARTIAL = "backup_partial"
 SERVICE_RESTORE_FULL = "restore_full"
 SERVICE_RESTORE_PARTIAL = "restore_partial"
+
+VALID_ADDON_SLUG = vol.Match(re.compile(r"^[-_.A-Za-z0-9]+$"))
+
+
+def valid_addon(value: Any) -> str:
+    """Validate value is a valid addon slug."""
+    value = VALID_ADDON_SLUG(value)
+    hass = async_get_hass_or_none()
+
+    if hass and (addons := get_addons_info(hass)) is not None and value not in addons:
+        raise vol.Invalid("Not a valid add-on slug")
+    return value
 
 
 SCHEMA_NO_DATA = vol.Schema({})
 
-SCHEMA_ADDON = vol.Schema({vol.Required(ATTR_ADDON): cv.string})
+SCHEMA_ADDON = vol.Schema({vol.Required(ATTR_ADDON): valid_addon})
 
 SCHEMA_ADDON_STDIN = SCHEMA_ADDON.extend(
     {vol.Required(ATTR_INPUT): vol.Any(dict, cv.string)}
 )
 
-SCHEMA_SNAPSHOT_FULL = vol.Schema(
-    {vol.Optional(ATTR_NAME): cv.string, vol.Optional(ATTR_PASSWORD): cv.string}
+SCHEMA_BACKUP_FULL = vol.Schema(
+    {
+        vol.Optional(
+            ATTR_NAME, default=lambda: now().strftime("%Y-%m-%d %H:%M:%S")
+        ): cv.string,
+        vol.Optional(ATTR_PASSWORD): cv.string,
+        vol.Optional(ATTR_COMPRESSED): cv.boolean,
+        vol.Optional(ATTR_LOCATION): vol.All(
+            cv.string, lambda v: None if v == "/backup" else v
+        ),
+        vol.Optional(ATTR_HOMEASSISTANT_EXCLUDE_DATABASE): cv.boolean,
+    }
 )
 
-SCHEMA_SNAPSHOT_PARTIAL = SCHEMA_SNAPSHOT_FULL.extend(
+SCHEMA_BACKUP_PARTIAL = SCHEMA_BACKUP_FULL.extend(
     {
+        vol.Optional(ATTR_HOMEASSISTANT): cv.boolean,
         vol.Optional(ATTR_FOLDERS): vol.All(cv.ensure_list, [cv.string]),
-        vol.Optional(ATTR_ADDONS): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_ADDONS): vol.All(cv.ensure_list, [VALID_ADDON_SLUG]),
     }
 )
 
 SCHEMA_RESTORE_FULL = vol.Schema(
-    {vol.Required(ATTR_SNAPSHOT): cv.slug, vol.Optional(ATTR_PASSWORD): cv.string}
+    {
+        vol.Required(ATTR_SLUG): cv.slug,
+        vol.Optional(ATTR_PASSWORD): cv.string,
+    }
 )
 
 SCHEMA_RESTORE_PARTIAL = SCHEMA_RESTORE_FULL.extend(
     {
         vol.Optional(ATTR_HOMEASSISTANT): cv.boolean,
         vol.Optional(ATTR_FOLDERS): vol.All(cv.ensure_list, [cv.string]),
-        vol.Optional(ATTR_ADDONS): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(ATTR_ADDONS): vol.All(cv.ensure_list, [VALID_ADDON_SLUG]),
     }
 )
 
 
+class APIEndpointSettings(NamedTuple):
+    """Settings for API endpoint."""
+
+    command: str
+    schema: vol.Schema
+    timeout: int | None = 60
+    pass_data: bool = False
+
+
 MAP_SERVICE_API = {
-    SERVICE_ADDON_START: ("/addons/{addon}/start", SCHEMA_ADDON, 60, False),
-    SERVICE_ADDON_STOP: ("/addons/{addon}/stop", SCHEMA_ADDON, 60, False),
-    SERVICE_ADDON_RESTART: ("/addons/{addon}/restart", SCHEMA_ADDON, 60, False),
-    SERVICE_ADDON_UPDATE: ("/addons/{addon}/update", SCHEMA_ADDON, 60, False),
-    SERVICE_ADDON_STDIN: ("/addons/{addon}/stdin", SCHEMA_ADDON_STDIN, 60, False),
-    SERVICE_HOST_SHUTDOWN: ("/host/shutdown", SCHEMA_NO_DATA, 60, False),
-    SERVICE_HOST_REBOOT: ("/host/reboot", SCHEMA_NO_DATA, 60, False),
-    SERVICE_SNAPSHOT_FULL: ("/snapshots/new/full", SCHEMA_SNAPSHOT_FULL, 300, True),
-    SERVICE_SNAPSHOT_PARTIAL: (
-        "/snapshots/new/partial",
-        SCHEMA_SNAPSHOT_PARTIAL,
-        300,
+    SERVICE_ADDON_START: APIEndpointSettings("/addons/{addon}/start", SCHEMA_ADDON),
+    SERVICE_ADDON_STOP: APIEndpointSettings("/addons/{addon}/stop", SCHEMA_ADDON),
+    SERVICE_ADDON_RESTART: APIEndpointSettings("/addons/{addon}/restart", SCHEMA_ADDON),
+    SERVICE_ADDON_UPDATE: APIEndpointSettings("/addons/{addon}/update", SCHEMA_ADDON),
+    SERVICE_ADDON_STDIN: APIEndpointSettings(
+        "/addons/{addon}/stdin", SCHEMA_ADDON_STDIN
+    ),
+    SERVICE_HOST_SHUTDOWN: APIEndpointSettings("/host/shutdown", SCHEMA_NO_DATA),
+    SERVICE_HOST_REBOOT: APIEndpointSettings("/host/reboot", SCHEMA_NO_DATA),
+    SERVICE_BACKUP_FULL: APIEndpointSettings(
+        "/backups/new/full",
+        SCHEMA_BACKUP_FULL,
+        None,
         True,
     ),
-    SERVICE_RESTORE_FULL: (
-        "/snapshots/{snapshot}/restore/full",
+    SERVICE_BACKUP_PARTIAL: APIEndpointSettings(
+        "/backups/new/partial",
+        SCHEMA_BACKUP_PARTIAL,
+        None,
+        True,
+    ),
+    SERVICE_RESTORE_FULL: APIEndpointSettings(
+        "/backups/{slug}/restore/full",
         SCHEMA_RESTORE_FULL,
-        300,
+        None,
         True,
     ),
-    SERVICE_RESTORE_PARTIAL: (
-        "/snapshots/{snapshot}/restore/partial",
+    SERVICE_RESTORE_PARTIAL: APIEndpointSettings(
+        "/backups/{slug}/restore/partial",
         SCHEMA_RESTORE_PARTIAL,
-        300,
+        None,
         True,
     ),
 }
 
-
-@bind_hass
-async def async_get_addon_info(hass: HomeAssistant, slug: str) -> dict:
-    """Return add-on info.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    return await hassio.get_addon_info(slug)
-
-
-@bind_hass
-async def async_update_diagnostics(hass: HomeAssistant, diagnostics: bool) -> dict:
-    """Update Supervisor diagnostics toggle.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    return await hassio.update_diagnostics(diagnostics)
+HARDWARE_INTEGRATIONS = {
+    "green": "homeassistant_green",
+    "odroid-c2": "hardkernel",
+    "odroid-c4": "hardkernel",
+    "odroid-m1": "hardkernel",
+    "odroid-m1s": "hardkernel",
+    "odroid-n2": "hardkernel",
+    "odroid-xu4": "hardkernel",
+    "rpi2": "raspberry_pi",
+    "rpi3": "raspberry_pi",
+    "rpi3-64": "raspberry_pi",
+    "rpi4": "raspberry_pi",
+    "rpi4-64": "raspberry_pi",
+    "rpi5-64": "raspberry_pi",
+    "yellow": "homeassistant_yellow",
+}
 
 
-@bind_hass
-@api_data
-async def async_install_addon(hass: HomeAssistant, slug: str) -> dict:
-    """Install add-on.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    command = f"/addons/{slug}/install"
-    return await hassio.send_command(command, timeout=None)
-
-
-@bind_hass
-@api_data
-async def async_uninstall_addon(hass: HomeAssistant, slug: str) -> dict:
-    """Uninstall add-on.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    command = f"/addons/{slug}/uninstall"
-    return await hassio.send_command(command, timeout=60)
-
-
-@bind_hass
-@api_data
-async def async_update_addon(hass: HomeAssistant, slug: str) -> dict:
-    """Update add-on.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    command = f"/addons/{slug}/update"
-    return await hassio.send_command(command, timeout=None)
-
-
-@bind_hass
-@api_data
-async def async_start_addon(hass: HomeAssistant, slug: str) -> dict:
-    """Start add-on.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    command = f"/addons/{slug}/start"
-    return await hassio.send_command(command, timeout=60)
-
-
-@bind_hass
-@api_data
-async def async_stop_addon(hass: HomeAssistant, slug: str) -> dict:
-    """Stop add-on.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    command = f"/addons/{slug}/stop"
-    return await hassio.send_command(command, timeout=60)
-
-
-@bind_hass
-@api_data
-async def async_set_addon_options(
-    hass: HomeAssistant, slug: str, options: dict
-) -> dict:
-    """Set add-on options.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    command = f"/addons/{slug}/options"
-    return await hassio.send_command(command, payload=options)
-
-
-@bind_hass
-async def async_get_addon_discovery_info(hass: HomeAssistant, slug: str) -> dict | None:
-    """Return discovery data for an add-on."""
-    hassio = hass.data[DOMAIN]
-    data = await hassio.retrieve_discovery_messages()
-    discovered_addons = data[ATTR_DISCOVERY]
-    return next((addon for addon in discovered_addons if addon["addon"] == slug), None)
-
-
-@bind_hass
-@api_data
-async def async_create_snapshot(
-    hass: HomeAssistant, payload: dict, partial: bool = False
-) -> dict:
-    """Create a full or partial snapshot.
-
-    The caller of the function should handle HassioAPIError.
-    """
-    hassio = hass.data[DOMAIN]
-    snapshot_type = "partial" if partial else "full"
-    command = f"/snapshots/new/{snapshot_type}"
-    return await hassio.send_command(command, payload=payload, timeout=None)
-
-
-@callback
-@bind_hass
-def get_info(hass):
-    """Return generic information from Supervisor.
-
-    Async friendly.
-    """
-    return hass.data.get(DATA_INFO)
-
-
-@callback
-@bind_hass
-def get_host_info(hass):
-    """Return generic host information.
-
-    Async friendly.
-    """
-    return hass.data.get(DATA_HOST_INFO)
-
-
-@callback
-@bind_hass
-def get_supervisor_info(hass):
-    """Return Supervisor information.
-
-    Async friendly.
-    """
-    return hass.data.get(DATA_SUPERVISOR_INFO)
-
-
-@callback
-@bind_hass
-def get_os_info(hass):
-    """Return OS information.
-
-    Async friendly.
-    """
-    return hass.data.get(DATA_OS_INFO)
-
-
-@callback
-@bind_hass
-def get_core_info(hass):
-    """Return Home Assistant Core information from Supervisor.
-
-    Async friendly.
-    """
-    return hass.data.get(DATA_CORE_INFO)
+def hostname_from_addon_slug(addon_slug: str) -> str:
+    """Return hostname of add-on."""
+    return addon_slug.replace("_", "-")
 
 
 @callback
@@ -328,17 +285,17 @@ def is_hassio(hass: HomeAssistant) -> bool:
 
 
 @callback
-def get_supervisor_ip():
+def get_supervisor_ip() -> str | None:
     """Return the supervisor ip address."""
     if "SUPERVISOR" not in os.environ:
         return None
     return os.environ["SUPERVISOR"].partition(":")[0]
 
 
-async def async_setup(hass: HomeAssistant, config: Config) -> bool:  # noqa: C901
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # noqa: C901
     """Set up the Hass.io component."""
     # Check local setup
-    for env in ("HASSIO", "HASSIO_TOKEN"):
+    for env in ("SUPERVISOR", "SUPERVISOR_TOKEN"):
         if os.environ.get(env):
             continue
         _LOGGER.error("Missing %s environment variable", env)
@@ -350,17 +307,15 @@ async def async_setup(hass: HomeAssistant, config: Config) -> bool:  # noqa: C90
 
     async_load_websocket_api(hass)
 
-    host = os.environ["HASSIO"]
-    websession = hass.helpers.aiohttp_client.async_get_clientsession()
+    host = os.environ["SUPERVISOR"]
+    websession = async_get_clientsession(hass)
     hass.data[DOMAIN] = hassio = HassIO(hass.loop, websession, host)
 
     if not await hassio.is_connected():
-        _LOGGER.warning("Not connected with Hass.io / system too busy!")
+        _LOGGER.warning("Not connected with the supervisor / system too busy!")
 
-    store = hass.helpers.storage.Store(STORAGE_VERSION, STORAGE_KEY)
-    data = await store.async_load()
-
-    if data is None:
+    store = Store[dict[str, str]](hass, STORAGE_VERSION, STORAGE_KEY)
+    if (data := await store.async_load()) is None:
         data = {}
 
     refresh_token = None
@@ -373,8 +328,14 @@ async def async_setup(hass: HomeAssistant, config: Config) -> bool:  # noqa: C90
             if not user.is_admin:
                 await hass.auth.async_update_user(user, group_ids=[GROUP_ID_ADMIN])
 
+            # Migrate old name
+            if user.name == "Hass.io":
+                await hass.auth.async_update_user(user, name=HASSIO_USER_NAME)
+
     if refresh_token is None:
-        user = await hass.auth.async_create_system_user("Hass.io", [GROUP_ID_ADMIN])
+        user = await hass.auth.async_create_system_user(
+            HASSIO_USER_NAME, group_ids=[GROUP_ID_ADMIN]
+        )
         refresh_token = await hass.auth.async_create_refresh_token(user)
         data["hassio_user"] = user.id
         await store.async_save(data)
@@ -382,27 +343,34 @@ async def async_setup(hass: HomeAssistant, config: Config) -> bool:  # noqa: C90
     # This overrides the normal API call that would be forwarded
     development_repo = config.get(DOMAIN, {}).get(CONF_FRONTEND_REPO)
     if development_repo is not None:
-        hass.http.register_static_path(
-            "/api/hassio/app", os.path.join(development_repo, "hassio/build"), False
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(
+                    "/api/hassio/app",
+                    os.path.join(development_repo, "hassio/build"),
+                    False,
+                )
+            ]
         )
 
     hass.http.register_view(HassIOView(host, websession))
 
-    await hass.components.panel_custom.async_register_panel(
+    await panel_custom.async_register_panel(
+        hass,
         frontend_url_path="hassio",
         webcomponent_name="hassio-main",
-        sidebar_title="Supervisor",
-        sidebar_icon="hass:home-assistant",
         js_url="/api/hassio/app/entrypoint.js",
         embed_iframe=True,
         require_admin=True,
     )
 
-    await hassio.update_hass_api(config.get("http", {}), refresh_token)
+    update_hass_api_task = hass.async_create_task(
+        hassio.update_hass_api(config.get("http", {}), refresh_token), eager_start=True
+    )
 
     last_timezone = None
 
-    async def push_config(_):
+    async def push_config(_: Event | None) -> None:
         """Push core config to Hass.io."""
         nonlocal last_timezone
 
@@ -416,115 +384,161 @@ async def async_setup(hass: HomeAssistant, config: Config) -> bool:  # noqa: C90
 
     hass.bus.async_listen(EVENT_CORE_CONFIG_UPDATE, push_config)
 
-    await push_config(None)
+    push_config_task = hass.async_create_task(push_config(None), eager_start=True)
+    # Start listening for problems with supervisor and making issues
+    hass.data[DATA_KEY_SUPERVISOR_ISSUES] = issues = SupervisorIssues(hass, hassio)
+    issues_task = hass.async_create_task(issues.setup(), eager_start=True)
 
-    async def async_service_handler(service):
+    async def async_service_handler(service: ServiceCall) -> None:
         """Handle service calls for Hass.io."""
-        api_command = MAP_SERVICE_API[service.service][0]
+        if service.service == SERVICE_ADDON_UPDATE:
+            async_create_issue(
+                hass,
+                DOMAIN,
+                "update_service_deprecated",
+                breaks_in_ha_version="2025.5",
+                is_fixable=False,
+                severity=IssueSeverity.WARNING,
+                translation_key="update_service_deprecated",
+            )
+        api_endpoint = MAP_SERVICE_API[service.service]
+
         data = service.data.copy()
         addon = data.pop(ATTR_ADDON, None)
-        snapshot = data.pop(ATTR_SNAPSHOT, None)
+        slug = data.pop(ATTR_SLUG, None)
         payload = None
 
         # Pass data to Hass.io API
         if service.service == SERVICE_ADDON_STDIN:
             payload = data[ATTR_INPUT]
-        elif MAP_SERVICE_API[service.service][3]:
+        elif api_endpoint.pass_data:
             payload = data
 
         # Call API
-        try:
+        # The exceptions are logged properly in hassio.send_command
+        with suppress(HassioAPIError):
             await hassio.send_command(
-                api_command.format(addon=addon, snapshot=snapshot),
+                api_endpoint.command.format(addon=addon, slug=slug),
                 payload=payload,
-                timeout=MAP_SERVICE_API[service.service][2],
+                timeout=api_endpoint.timeout,
             )
-        except HassioAPIError as err:
-            _LOGGER.error("Error on Hass.io API: %s", err)
 
     for service, settings in MAP_SERVICE_API.items():
         hass.services.async_register(
-            DOMAIN, service, async_service_handler, schema=settings[1]
+            DOMAIN, service, async_service_handler, schema=settings.schema
         )
 
-    async def update_info_data(now):
+    async def update_info_data(_: datetime | None = None) -> None:
         """Update last available supervisor information."""
-        try:
-            hass.data[DATA_INFO] = await hassio.get_info()
-            hass.data[DATA_HOST_INFO] = await hassio.get_host_info()
-            hass.data[DATA_CORE_INFO] = await hassio.get_core_info()
-            hass.data[DATA_SUPERVISOR_INFO] = await hassio.get_supervisor_info()
-            hass.data[DATA_OS_INFO] = await hassio.get_os_info()
-            if ADDONS_COORDINATOR in hass.data:
-                await hass.data[ADDONS_COORDINATOR].async_refresh()
-        except HassioAPIError as err:
-            _LOGGER.warning("Can't read last version: %s", err)
+        supervisor_client = get_supervisor_client(hass)
 
-        hass.helpers.event.async_track_point_in_utc_time(
-            update_info_data, utcnow() + HASSIO_UPDATE_INTERVAL
+        try:
+            (
+                hass.data[DATA_INFO],
+                hass.data[DATA_HOST_INFO],
+                store_info,
+                hass.data[DATA_CORE_INFO],
+                hass.data[DATA_SUPERVISOR_INFO],
+                hass.data[DATA_OS_INFO],
+                hass.data[DATA_NETWORK_INFO],
+            ) = await asyncio.gather(
+                create_eager_task(hassio.get_info()),
+                create_eager_task(hassio.get_host_info()),
+                create_eager_task(supervisor_client.store.info()),
+                create_eager_task(hassio.get_core_info()),
+                create_eager_task(hassio.get_supervisor_info()),
+                create_eager_task(hassio.get_os_info()),
+                create_eager_task(hassio.get_network_info()),
+            )
+
+        except HassioAPIError as err:
+            _LOGGER.warning("Can't read Supervisor data: %s", err)
+        else:
+            hass.data[DATA_STORE] = store_info.to_dict()
+
+        async_call_later(
+            hass,
+            HASSIO_UPDATE_INTERVAL,
+            HassJob(update_info_data, cancel_on_shutdown=True),
         )
 
-    # Fetch last version
-    await update_info_data(None)
+    # Fetch data
+    update_info_task = hass.async_create_task(update_info_data(), eager_start=True)
 
-    async def async_handle_core_service(call):
-        """Service handler for handling core services."""
-        if call.service == SERVICE_HOMEASSISTANT_STOP:
-            await hassio.stop_homeassistant()
-            return
-
-        try:
-            errors = await conf_util.async_check_ha_config_file(hass)
-        except HomeAssistantError:
-            return
-
-        if errors:
-            _LOGGER.error(errors)
-            hass.components.persistent_notification.async_create(
-                "Config error. See [the logs](/config/logs) for details.",
-                "Config validating",
-                f"{HASS_DOMAIN}.check_config",
-            )
-            return
-
-        if call.service == SERVICE_HOMEASSISTANT_RESTART:
+    async def _async_stop(hass: HomeAssistant, restart: bool) -> None:
+        """Stop or restart home assistant."""
+        if restart:
             await hassio.restart_homeassistant()
+        else:
+            await hassio.stop_homeassistant()
 
-    # Mock core services
-    for service in (
-        SERVICE_HOMEASSISTANT_STOP,
-        SERVICE_HOMEASSISTANT_RESTART,
-        SERVICE_CHECK_CONFIG,
-    ):
-        hass.services.async_register(HASS_DOMAIN, service, async_handle_core_service)
+    # Set a custom handler for the homeassistant.restart and homeassistant.stop services
+    async_set_stop_handler(hass, _async_stop)
 
     # Init discovery Hass.io feature
     async_setup_discovery_view(hass, hassio)
 
     # Init auth Hass.io feature
+    assert user is not None
     async_setup_auth_view(hass, user)
 
     # Init ingress Hass.io feature
     async_setup_ingress_view(hass, host)
 
     # Init add-on ingress panels
-    await async_setup_addon_panel(hass, hassio)
-
-    hass.async_create_task(
-        hass.config_entries.flow.async_init(DOMAIN, context={"source": "system"})
+    panels_task = hass.async_create_task(
+        async_setup_addon_panel(hass, hassio), eager_start=True
     )
 
+    # Make sure to await the update_info task before
+    # _async_setup_hardware_integration is called
+    # so the hardware integration can be set up
+    # and does not fallback to calling later
+    await update_hass_api_task
+    await panels_task
+    await update_info_task
+    await push_config_task
+    await issues_task
+
+    # Setup hardware integration for the detected board type
+    @callback
+    def _async_setup_hardware_integration(_: datetime | None = None) -> None:
+        """Set up hardware integration for the detected board type."""
+        if (os_info := get_os_info(hass)) is None:
+            # os info not yet fetched from supervisor, retry later
+            async_call_later(
+                hass,
+                HASSIO_UPDATE_INTERVAL,
+                async_setup_hardware_integration_job,
+            )
+            return
+        if (board := os_info.get("board")) is None:
+            return
+        if (hw_integration := HARDWARE_INTEGRATIONS.get(board)) is None:
+            return
+        discovery_flow.async_create_flow(
+            hass, hw_integration, context={"source": SOURCE_SYSTEM}, data={}
+        )
+
+    async_setup_hardware_integration_job = HassJob(
+        _async_setup_hardware_integration, cancel_on_shutdown=True
+    )
+
+    _async_setup_hardware_integration()
+    discovery_flow.async_create_flow(
+        hass, DOMAIN, context={"source": SOURCE_SYSTEM}, data={}
+    )
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up a config entry."""
-    dev_reg = await async_get_registry(hass)
+    dev_reg = dr.async_get(hass)
     coordinator = HassioDataUpdateCoordinator(hass, entry, dev_reg)
+    await coordinator.async_config_entry_first_refresh()
     hass.data[ADDONS_COORDINATOR] = coordinator
-    await coordinator.async_refresh()
 
-    hass.config_entries.async_setup_platforms(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
@@ -537,105 +551,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.pop(ADDONS_COORDINATOR, None)
 
     return unload_ok
-
-
-@callback
-def async_register_addons_in_dev_reg(
-    entry_id: str, dev_reg: DeviceRegistry, addons: list[dict[str, Any]]
-) -> None:
-    """Register addons in the device registry."""
-    for addon in addons:
-        params = {
-            "config_entry_id": entry_id,
-            "identifiers": {(DOMAIN, addon[ATTR_SLUG])},
-            "model": "Home Assistant Add-on",
-            "sw_version": addon[ATTR_VERSION],
-            "name": addon[ATTR_NAME],
-            "entry_type": ATTR_SERVICE,
-        }
-        if manufacturer := addon.get(ATTR_REPOSITORY) or addon.get(ATTR_URL):
-            params["manufacturer"] = manufacturer
-        dev_reg.async_get_or_create(**params)
-
-
-@callback
-def async_register_os_in_dev_reg(
-    entry_id: str, dev_reg: DeviceRegistry, os_dict: dict[str, Any]
-) -> None:
-    """Register OS in the device registry."""
-    params = {
-        "config_entry_id": entry_id,
-        "identifiers": {(DOMAIN, "OS")},
-        "manufacturer": "Home Assistant",
-        "model": "Home Assistant Operating System",
-        "sw_version": os_dict[ATTR_VERSION],
-        "name": "Home Assistant Operating System",
-        "entry_type": ATTR_SERVICE,
-    }
-    dev_reg.async_get_or_create(**params)
-
-
-@callback
-def async_remove_addons_from_dev_reg(
-    dev_reg: DeviceRegistry, addons: list[dict[str, Any]]
-) -> None:
-    """Remove addons from the device registry."""
-    for addon_slug in addons:
-        if dev := dev_reg.async_get_device({(DOMAIN, addon_slug)}):
-            dev_reg.async_remove_device(dev.id)
-
-
-class HassioDataUpdateCoordinator(DataUpdateCoordinator):
-    """Class to retrieve Hass.io status."""
-
-    def __init__(
-        self, hass: HomeAssistant, config_entry: ConfigEntry, dev_reg: DeviceRegistry
-    ) -> None:
-        """Initialize coordinator."""
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=DOMAIN,
-            update_method=self._async_update_data,
-        )
-        self.data = {}
-        self.entry_id = config_entry.entry_id
-        self.dev_reg = dev_reg
-        self.is_hass_os = "hassos" in get_info(self.hass)
-
-    async def _async_update_data(self) -> dict[str, Any]:
-        """Update data via library."""
-        new_data = {}
-        addon_data = get_supervisor_info(self.hass)
-
-        new_data["addons"] = {
-            addon[ATTR_SLUG]: addon for addon in addon_data.get("addons", [])
-        }
-        if self.is_hass_os:
-            new_data["os"] = get_os_info(self.hass)
-
-        # If this is the initial refresh, register all addons and return the dict
-        if not self.data:
-            async_register_addons_in_dev_reg(
-                self.entry_id, self.dev_reg, new_data["addons"].values()
-            )
-            if self.is_hass_os:
-                async_register_os_in_dev_reg(
-                    self.entry_id, self.dev_reg, new_data["os"]
-                )
-            return new_data
-
-        # Remove add-ons that are no longer installed from device registry
-        if removed_addons := list(set(self.data["addons"]) - set(new_data["addons"])):
-            async_remove_addons_from_dev_reg(self.dev_reg, removed_addons)
-
-        # If there are new add-ons, we should reload the config entry so we can
-        # create new devices and entities. We can return an empty dict because
-        # coordinator will be recreated.
-        if list(set(new_data["addons"]) - set(self.data["addons"])):
-            self.hass.async_create_task(
-                self.hass.config_entries.async_reload(self.entry_id)
-            )
-            return {}
-
-        return new_data

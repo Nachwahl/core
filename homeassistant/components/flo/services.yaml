@@ -1,32 +1,38 @@
 # Describes the format for available Flo services
 
 set_sleep_mode:
-  description: Set the location into sleep mode.
+  target:
+    entity:
+      integration: flo
+      domain: switch
   fields:
-    entity_id:
-      description: Flo switch entity id
-      example: "switch.shutoff_valve"
     sleep_minutes:
-      description: The time to sleep in minutes.
-      example: 120
+      default: true
+      selector:
+        select:
+          options:
+            - "120"
+            - "1440"
+            - "4320"
     revert_to_mode:
-      description: The mode to revert to after sleep_minutes has elapsed.
-      example: "home"
+      default: true
+      selector:
+        select:
+          options:
+            - "away"
+            - "home"
 set_away_mode:
-  description: Set the location into away mode.
-  fields:
-    entity_id:
-      description: Flo switch entity id
-      example: "switch.shutoff_valve"
+  target:
+    entity:
+      integration: flo
+      domain: switch
 set_home_mode:
-  description: Set the location into home mode.
-  fields:
-    entity_id:
-      description: Flo switch entity id
-      example: "switch.shutoff_valve"
+  target:
+    entity:
+      integration: flo
+      domain: switch
 run_health_test:
-  description: Have the Flo device run a health test.
-  fields:
-    entity_id:
-      description: Flo switch entity id
-      example: "switch.shutoff_valve"
+  target:
+    entity:
+      integration: flo
+      domain: switch

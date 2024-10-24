@@ -1,4 +1,5 @@
 """Test function in gateway.py."""
+
 from unittest.mock import patch
 
 import pytest
@@ -9,7 +10,7 @@ from homeassistant.core import HomeAssistant
 
 
 @pytest.mark.parametrize(
-    "port, expect_valid",
+    ("port", "expect_valid"),
     [
         ("COM5", True),
         ("asdf", False),
@@ -18,7 +19,9 @@ from homeassistant.core import HomeAssistant
         ("/dev/ttyACM0", False),
     ],
 )
-def test_is_serial_port_windows(hass: HomeAssistant, port: str, expect_valid: bool):
+def test_is_serial_port_windows(
+    hass: HomeAssistant, port: str, expect_valid: bool
+) -> None:
     """Test windows serial port."""
 
     with patch("sys.platform", "win32"):

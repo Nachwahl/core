@@ -1,273 +1,219 @@
 """Support ezviz camera devices."""
-import asyncio
-from datetime import timedelta
+
+from __future__ import annotations
+
 import logging
 
-from haffmpeg.tools import IMAGE_JPEG, ImageFrame
-import voluptuous as vol
+from pyezviz.exceptions import HTTPError, InvalidHost, PyEzvizError
 
-from homeassistant.components.camera import PLATFORM_SCHEMA, SUPPORT_STREAM, Camera
-from homeassistant.components.ffmpeg import DATA_FFMPEG
-from homeassistant.config_entries import SOURCE_DISCOVERY, SOURCE_IGNORE, SOURCE_IMPORT
+from homeassistant.components import ffmpeg
+from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.ffmpeg import get_ffmpeg_manager
+from homeassistant.components.stream import CONF_USE_WALLCLOCK_AS_TIMESTAMPS
+from homeassistant.config_entries import (
+    SOURCE_IGNORE,
+    SOURCE_INTEGRATION_DISCOVERY,
+    ConfigEntry,
+)
 from homeassistant.const import CONF_IP_ADDRESS, CONF_PASSWORD, CONF_USERNAME
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.restore_state import RestoreEntity
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import discovery_flow
+from homeassistant.helpers.entity_platform import (
+    AddEntitiesCallback,
+    async_get_current_platform,
+)
 
 from .const import (
     ATTR_SERIAL,
-    CONF_CAMERAS,
     CONF_FFMPEG_ARGUMENTS,
     DATA_COORDINATOR,
     DEFAULT_CAMERA_USERNAME,
     DEFAULT_FFMPEG_ARGUMENTS,
-    DEFAULT_RTSP_PORT,
     DOMAIN,
-    MANUFACTURER,
+    SERVICE_WAKE_DEVICE,
 )
-
-CAMERA_SCHEMA = vol.Schema(
-    {vol.Required(CONF_USERNAME): cv.string, vol.Required(CONF_PASSWORD): cv.string}
-)
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_USERNAME): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_CAMERAS, default={}): {cv.string: CAMERA_SCHEMA},
-    }
-)
+from .coordinator import EzvizDataUpdateCoordinator
+from .entity import EzvizEntity
 
 _LOGGER = logging.getLogger(__name__)
 
-MIN_TIME_BETWEEN_SESSION_RENEW = timedelta(seconds=90)
 
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Set up EZVIZ cameras based on a config entry."""
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up a Ezviz IP Camera from platform config."""
-    _LOGGER.warning(
-        "Loading ezviz via platform config is deprecated, it will be automatically imported. Please remove it afterwards"
-    )
-
-    # Check if entry config exists and skips import if it does.
-    if hass.config_entries.async_entries(DOMAIN):
-        return
-
-    # Check if importing camera account.
-    if CONF_CAMERAS in config:
-        cameras_conf = config[CONF_CAMERAS]
-        for serial, camera in cameras_conf.items():
-            hass.async_create_task(
-                hass.config_entries.flow.async_init(
-                    DOMAIN,
-                    context={"source": SOURCE_IMPORT},
-                    data={
-                        ATTR_SERIAL: serial,
-                        CONF_USERNAME: camera[CONF_USERNAME],
-                        CONF_PASSWORD: camera[CONF_PASSWORD],
-                    },
-                )
-            )
-
-    # Check if importing main ezviz cloud account.
-    hass.async_create_task(
-        hass.config_entries.flow.async_init(
-            DOMAIN,
-            context={"source": SOURCE_IMPORT},
-            data=config,
-        )
-    )
-
-
-async def async_setup_entry(hass, entry, async_add_entities):
-    """Set up Ezviz cameras based on a config entry."""
-
-    coordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
-    camera_config_entries = hass.config_entries.async_entries(DOMAIN)
+    coordinator: EzvizDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id][
+        DATA_COORDINATOR
+    ]
 
     camera_entities = []
 
-    for idx, camera in enumerate(coordinator.data):
-
-        # There seem to be a bug related to localRtspPort in Ezviz API...
-        local_rtsp_port = DEFAULT_RTSP_PORT
-
+    for camera, value in coordinator.data.items():
         camera_rtsp_entry = [
             item
-            for item in camera_config_entries
-            if item.unique_id == camera[ATTR_SERIAL]
+            for item in hass.config_entries.async_entries(DOMAIN)
+            if item.unique_id == camera and item.source != SOURCE_IGNORE
         ]
 
-        if camera["local_rtsp_port"] != 0:
-            local_rtsp_port = camera["local_rtsp_port"]
-
         if camera_rtsp_entry:
-            conf_cameras = camera_rtsp_entry[0]
+            ffmpeg_arguments = camera_rtsp_entry[0].options[CONF_FFMPEG_ARGUMENTS]
+            camera_username = camera_rtsp_entry[0].data[CONF_USERNAME]
+            camera_password = camera_rtsp_entry[0].data[CONF_PASSWORD]
 
-            # Skip ignored entities.
-            if conf_cameras.source == SOURCE_IGNORE:
-                continue
-
-            ffmpeg_arguments = conf_cameras.options.get(
-                CONF_FFMPEG_ARGUMENTS, DEFAULT_FFMPEG_ARGUMENTS
-            )
-
-            camera_username = conf_cameras.data[CONF_USERNAME]
-            camera_password = conf_cameras.data[CONF_PASSWORD]
-
-            camera_rtsp_stream = f"rtsp://{camera_username}:{camera_password}@{camera['local_ip']}:{local_rtsp_port}{ffmpeg_arguments}"
+            camera_rtsp_stream = f"rtsp://{camera_username}:{camera_password}@{value['local_ip']}:{value['local_rtsp_port']}{ffmpeg_arguments}"
             _LOGGER.debug(
-                "Camera %s source stream: %s", camera[ATTR_SERIAL], camera_rtsp_stream
+                "Configuring Camera %s with ip: %s rtsp port: %s ffmpeg arguments: %s",
+                camera,
+                value["local_ip"],
+                value["local_rtsp_port"],
+                ffmpeg_arguments,
             )
 
         else:
-
-            hass.async_create_task(
-                hass.config_entries.flow.async_init(
-                    DOMAIN,
-                    context={"source": SOURCE_DISCOVERY},
-                    data={
-                        ATTR_SERIAL: camera[ATTR_SERIAL],
-                        CONF_IP_ADDRESS: camera["local_ip"],
-                    },
-                )
+            discovery_flow.async_create_flow(
+                hass,
+                DOMAIN,
+                context={"source": SOURCE_INTEGRATION_DISCOVERY},
+                data={
+                    ATTR_SERIAL: camera,
+                    CONF_IP_ADDRESS: value["local_ip"],
+                },
             )
 
-            camera_username = DEFAULT_CAMERA_USERNAME
-            camera_password = ""
-            camera_rtsp_stream = ""
-            ffmpeg_arguments = DEFAULT_FFMPEG_ARGUMENTS
             _LOGGER.warning(
-                "Found camera with serial %s without configuration. Please go to integration to complete setup",
-                camera[ATTR_SERIAL],
+                (
+                    "Found camera with serial %s without configuration. Please go to"
+                    " integration to complete setup"
+                ),
+                camera,
             )
+
+            ffmpeg_arguments = DEFAULT_FFMPEG_ARGUMENTS
+            camera_username = DEFAULT_CAMERA_USERNAME
+            camera_password = None
+            camera_rtsp_stream = ""
 
         camera_entities.append(
             EzvizCamera(
                 hass,
                 coordinator,
-                idx,
+                camera,
                 camera_username,
                 camera_password,
                 camera_rtsp_stream,
-                local_rtsp_port,
+                value["local_rtsp_port"],
                 ffmpeg_arguments,
             )
         )
 
     async_add_entities(camera_entities)
 
+    platform = async_get_current_platform()
 
-class EzvizCamera(CoordinatorEntity, Camera, RestoreEntity):
-    """An implementation of a Ezviz security camera."""
+    platform.async_register_entity_service(
+        SERVICE_WAKE_DEVICE, None, "perform_wake_device"
+    )
+
+
+class EzvizCamera(EzvizEntity, Camera):
+    """An implementation of a EZVIZ security camera."""
+
+    _attr_name = None
 
     def __init__(
         self,
-        hass,
-        coordinator,
-        idx,
-        camera_username,
-        camera_password,
-        camera_rtsp_stream,
-        local_rtsp_port,
-        ffmpeg_arguments,
-    ):
-        """Initialize a Ezviz security camera."""
-        super().__init__(coordinator)
+        hass: HomeAssistant,
+        coordinator: EzvizDataUpdateCoordinator,
+        serial: str,
+        camera_username: str,
+        camera_password: str | None,
+        camera_rtsp_stream: str | None,
+        local_rtsp_port: int,
+        ffmpeg_arguments: str | None,
+    ) -> None:
+        """Initialize a EZVIZ security camera."""
+        super().__init__(coordinator, serial)
         Camera.__init__(self)
+        self.stream_options[CONF_USE_WALLCLOCK_AS_TIMESTAMPS] = True
         self._username = camera_username
         self._password = camera_password
         self._rtsp_stream = camera_rtsp_stream
-        self._idx = idx
-        self._ffmpeg = hass.data[DATA_FFMPEG]
         self._local_rtsp_port = local_rtsp_port
         self._ffmpeg_arguments = ffmpeg_arguments
-
-        self._serial = self.coordinator.data[self._idx]["serial"]
-        self._name = self.coordinator.data[self._idx]["name"]
-        self._local_ip = self.coordinator.data[self._idx]["local_ip"]
+        self._ffmpeg = get_ffmpeg_manager(hass)
+        self._attr_unique_id = serial
+        if camera_password:
+            self._attr_supported_features = CameraEntityFeature.STREAM
 
     @property
-    def available(self):
+    def available(self) -> bool:
         """Return True if entity is available."""
-        if self.coordinator.data[self._idx]["status"] == 2:
-            return False
-
-        return True
+        return self.data["status"] != 2
 
     @property
-    def supported_features(self):
-        """Return supported features."""
-        if self._rtsp_stream:
-            return SUPPORT_STREAM
-        return 0
-
-    @property
-    def name(self):
-        """Return the name of this device."""
-        return self._name
-
-    @property
-    def model(self):
-        """Return the model of this device."""
-        return self.coordinator.data[self._idx]["device_sub_category"]
-
-    @property
-    def brand(self):
-        """Return the manufacturer of this device."""
-        return MANUFACTURER
-
-    @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if on."""
-        return bool(self.coordinator.data[self._idx]["status"])
+        return bool(self.data["status"])
 
     @property
-    def is_recording(self):
+    def is_recording(self) -> bool:
         """Return true if the device is recording."""
-        return self.coordinator.data[self._idx]["alarm_notify"]
+        return self.data["alarm_notify"]
 
     @property
-    def motion_detection_enabled(self):
+    def motion_detection_enabled(self) -> bool:
         """Camera Motion Detection Status."""
-        return self.coordinator.data[self._idx]["alarm_notify"]
+        return self.data["alarm_notify"]
 
-    @property
-    def unique_id(self):
-        """Return the name of this camera."""
-        return self._serial
+    def enable_motion_detection(self) -> None:
+        """Enable motion detection in camera."""
+        try:
+            self.coordinator.ezviz_client.set_camera_defence(self._serial, 1)
 
-    async def async_camera_image(self):
+        except InvalidHost as err:
+            raise InvalidHost("Error enabling motion detection") from err
+
+    def disable_motion_detection(self) -> None:
+        """Disable motion detection."""
+        try:
+            self.coordinator.ezviz_client.set_camera_defence(self._serial, 0)
+
+        except InvalidHost as err:
+            raise InvalidHost("Error disabling motion detection") from err
+
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
         """Return a frame from the camera stream."""
-        ffmpeg = ImageFrame(self._ffmpeg.binary)
-
-        image = await asyncio.shield(
-            ffmpeg.get_image(self._rtsp_stream, output_format=IMAGE_JPEG)
+        if self._rtsp_stream is None:
+            return None
+        return await ffmpeg.async_get_image(
+            self.hass, self._rtsp_stream, width=width, height=height
         )
-        return image
 
-    @property
-    def device_info(self):
-        """Return the device_info of the device."""
-        return {
-            "identifiers": {(DOMAIN, self._serial)},
-            "name": self.coordinator.data[self._idx]["name"],
-            "model": self.coordinator.data[self._idx]["device_sub_category"],
-            "manufacturer": MANUFACTURER,
-            "sw_version": self.coordinator.data[self._idx]["version"],
-        }
-
-    async def stream_source(self):
+    async def stream_source(self) -> str | None:
         """Return the stream source."""
-        local_ip = self.coordinator.data[self._idx]["local_ip"]
-        if self._local_rtsp_port:
-            rtsp_stream_source = (
-                f"rtsp://{self._username}:{self._password}@"
-                f"{local_ip}:{self._local_rtsp_port}{self._ffmpeg_arguments}"
-            )
-            _LOGGER.debug(
-                "Camera %s source stream: %s", self._serial, rtsp_stream_source
-            )
-            self._rtsp_stream = rtsp_stream_source
-            return rtsp_stream_source
-        return None
+        if self._password is None:
+            return None
+        local_ip = self.data["local_ip"]
+        self._rtsp_stream = (
+            f"rtsp://{self._username}:{self._password}@"
+            f"{local_ip}:{self._local_rtsp_port}{self._ffmpeg_arguments}"
+        )
+        _LOGGER.debug(
+            "Configuring Camera %s with ip: %s rtsp port: %s ffmpeg arguments: %s",
+            self._serial,
+            local_ip,
+            self._local_rtsp_port,
+            self._ffmpeg_arguments,
+        )
+
+        return self._rtsp_stream
+
+    def perform_wake_device(self) -> None:
+        """Basically wakes the camera by querying the device."""
+        try:
+            self.coordinator.ezviz_client.get_detection_sensibility(self._serial)
+        except (HTTPError, PyEzvizError) as err:
+            raise PyEzvizError("Cannot wake device") from err

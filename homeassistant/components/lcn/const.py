@@ -1,26 +1,31 @@
 """Constants for the LCN component."""
+
 from itertools import product
 
-from homeassistant.const import (
-    DEGREE,
-    PERCENTAGE,
-    TEMP_CELSIUS,
-    TEMP_FAHRENHEIT,
-    TEMP_KELVIN,
-    VOLT,
-)
+from homeassistant.const import Platform
+
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.CLIMATE,
+    Platform.COVER,
+    Platform.LIGHT,
+    Platform.SCENE,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 DOMAIN = "lcn"
 DATA_LCN = "lcn"
 DEFAULT_NAME = "pchk"
 
+ADD_ENTITIES_CALLBACKS = "add_entities_callbacks"
 CONNECTION = "connection"
 CONF_HARDWARE_SERIAL = "hardware_serial"
 CONF_SOFTWARE_SERIAL = "software_serial"
 CONF_HARDWARE_TYPE = "hardware_type"
-CONF_RESOURCE = "resource"
 CONF_DOMAIN_DATA = "domain_data"
 
+CONF_ACKNOWLEDGE = "acknowledge"
 CONF_CONNECTIONS = "connections"
 CONF_SK_NUM_TRIES = "sk_num_tries"
 CONF_OUTPUT = "output"
@@ -155,9 +160,9 @@ VAR_UNITS = [
     "",
     "LCN",
     "NATIVE",
-    TEMP_CELSIUS,
-    TEMP_KELVIN,
-    TEMP_FAHRENHEIT,
+    "°C",
+    "K",
+    "°F",
     "LUX_T",
     "LX_T",
     "LUX_I",
@@ -165,21 +170,50 @@ VAR_UNITS = [
     "LX",
     "M/S",
     "METERPERSECOND",
-    PERCENTAGE,
+    "%",
     "PERCENT",
     "PPM",
     "VOLT",
-    VOLT,
+    "V",
     "AMPERE",
     "AMP",
     "A",
     "DEGREE",
-    DEGREE,
+    "°",
 ]
 
 RELVARREF = ["CURRENT", "PROG"]
 
 SENDKEYCOMMANDS = ["HIT", "MAKE", "BREAK", "DONTSEND"]
+
+SENDKEYS = [
+    "A1",
+    "A2",
+    "A3",
+    "A4",
+    "A5",
+    "A6",
+    "A7",
+    "A8",
+    "B1",
+    "B2",
+    "B3",
+    "B4",
+    "B5",
+    "B6",
+    "B7",
+    "B8",
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6",
+    "C7",
+    "C8",
+]
+
+KEY_ACTIONS = ["HIT", "MAKE", "BREAK"]
 
 TIME_UNITS = [
     "SECONDS",

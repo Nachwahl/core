@@ -1,6 +1,9 @@
 """The tests for the WSDOT platform."""
+
 from datetime import datetime, timedelta, timezone
 import re
+
+import requests_mock
 
 import homeassistant.components.wsdot.sensor as wsdot
 from homeassistant.components.wsdot.sensor import (
@@ -13,6 +16,7 @@ from homeassistant.components.wsdot.sensor import (
     RESOURCE,
     SCAN_INTERVAL,
 )
+from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from tests.common import load_fixture
@@ -24,26 +28,28 @@ config = {
 }
 
 
-async def test_setup_with_config(hass):
+async def test_setup_with_config(hass: HomeAssistant) -> None:
     """Test the platform setup with configuration."""
     assert await async_setup_component(hass, "sensor", {"wsdot": config})
 
 
-async def test_setup(hass, requests_mock):
+async def test_setup(hass: HomeAssistant, requests_mock: requests_mock.Mocker) -> None:
     """Test for operational WSDOT sensor with proper attributes."""
     entities = []
 
     def add_entities(new_entities, update_before_add=False):
         """Mock add entities."""
+        for entity in new_entities:
+            entity.hass = hass
+
         if update_before_add:
             for entity in new_entities:
                 entity.update()
 
-        for entity in new_entities:
-            entities.append(entity)
+        entities.extend(new_entities)
 
     uri = re.compile(RESOURCE + "*")
-    requests_mock.get(uri, text=load_fixture("wsdot.json"))
+    requests_mock.get(uri, text=load_fixture("wsdot/wsdot.json"))
     wsdot.setup_platform(hass, config, add_entities)
     assert len(entities) == 1
     sensor = entities[0]

@@ -1,53 +1,74 @@
 """Support for KNX/IP fans."""
+
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Final
 
 from xknx.devices import Fan as XknxFan
 
-from homeassistant.components.fan import SUPPORT_OSCILLATE, SUPPORT_SET_SPEED, FanEntity
+from homeassistant import config_entries
+from homeassistant.components.fan import FanEntity, FanEntityFeature
+from homeassistant.const import CONF_ENTITY_CATEGORY, CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.util.percentage import (
-    int_states_in_range,
     percentage_to_ranged_value,
     ranged_value_to_percentage,
 )
+from homeassistant.util.scaling import int_states_in_range
 
-from .const import DOMAIN
-from .knx_entity import KnxEntity
+from . import KNXModule
+from .const import KNX_ADDRESS, KNX_MODULE_KEY
+from .entity import KnxYamlEntity
+from .schema import FanSchema
 
-DEFAULT_PERCENTAGE = 50
+DEFAULT_PERCENTAGE: Final = 50
 
 
-async def async_setup_platform(
+async def async_setup_entry(
     hass: HomeAssistant,
-    config: ConfigType,
+    config_entry: config_entries.ConfigEntry,
     async_add_entities: AddEntitiesCallback,
-    discovery_info: DiscoveryInfoType | None = None,
 ) -> None:
-    """Set up fans for KNX platform."""
-    entities = []
-    for device in hass.data[DOMAIN].xknx.devices:
-        if isinstance(device, XknxFan):
-            entities.append(KNXFan(device))
-    async_add_entities(entities)
+    """Set up fan(s) for KNX platform."""
+    knx_module = hass.data[KNX_MODULE_KEY]
+    config: list[ConfigType] = knx_module.config_yaml[Platform.FAN]
+
+    async_add_entities(KNXFan(knx_module, entity_config) for entity_config in config)
 
 
-class KNXFan(KnxEntity, FanEntity):
+class KNXFan(KnxYamlEntity, FanEntity):
     """Representation of a KNX fan."""
 
-    def __init__(self, device: XknxFan) -> None:
+    _device: XknxFan
+    _enable_turn_on_off_backwards_compatibility = False
+
+    def __init__(self, knx_module: KNXModule, config: ConfigType) -> None:
         """Initialize of KNX fan."""
-        self._device: XknxFan
-        super().__init__(device)
-        self._unique_id = f"{self._device.speed.group_address}"
-        self._step_range: tuple[int, int] | None = None
-        if device.max_step:
-            # FanSpeedMode.STEP:
-            self._step_range = (1, device.max_step)
+        max_step = config.get(FanSchema.CONF_MAX_STEP)
+        super().__init__(
+            knx_module=knx_module,
+            device=XknxFan(
+                xknx=knx_module.xknx,
+                name=config[CONF_NAME],
+                group_address_speed=config.get(KNX_ADDRESS),
+                group_address_speed_state=config.get(FanSchema.CONF_STATE_ADDRESS),
+                group_address_oscillation=config.get(
+                    FanSchema.CONF_OSCILLATION_ADDRESS
+                ),
+                group_address_oscillation_state=config.get(
+                    FanSchema.CONF_OSCILLATION_STATE_ADDRESS
+                ),
+                max_step=max_step,
+            ),
+        )
+        # FanSpeedMode.STEP if max_step is set
+        self._step_range: tuple[int, int] | None = (1, max_step) if max_step else None
+        self._attr_entity_category = config.get(CONF_ENTITY_CATEGORY)
+
+        self._attr_unique_id = str(self._device.speed.group_address)
 
     async def async_set_percentage(self, percentage: int) -> None:
         """Set the speed of the fan, as a percentage."""
@@ -58,12 +79,16 @@ class KNXFan(KnxEntity, FanEntity):
             await self._device.set_speed(percentage)
 
     @property
-    def supported_features(self) -> int:
+    def supported_features(self) -> FanEntityFeature:
         """Flag supported features."""
-        flags = SUPPORT_SET_SPEED
+        flags = (
+            FanEntityFeature.SET_SPEED
+            | FanEntityFeature.TURN_ON
+            | FanEntityFeature.TURN_OFF
+        )
 
         if self._device.supports_oscillation:
-            flags |= SUPPORT_OSCILLATE
+            flags |= FanEntityFeature.OSCILLATE
 
         return flags
 
@@ -88,7 +113,6 @@ class KNXFan(KnxEntity, FanEntity):
 
     async def async_turn_on(
         self,
-        speed: str | None = None,
         percentage: int | None = None,
         preset_mode: str | None = None,
         **kwargs: Any,

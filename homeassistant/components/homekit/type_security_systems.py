@@ -1,15 +1,14 @@
 """Class to hold all alarm control panel accessories."""
+
 import logging
+from typing import Any
 
 from pyhap.const import CATEGORY_ALARM_SYSTEM
-from pyhap.loader import get_loader
 
-from homeassistant.components.alarm_control_panel import DOMAIN
-from homeassistant.components.alarm_control_panel.const import (
-    SUPPORT_ALARM_ARM_AWAY,
-    SUPPORT_ALARM_ARM_HOME,
-    SUPPORT_ALARM_ARM_NIGHT,
-    SUPPORT_ALARM_TRIGGER,
+from homeassistant.components.alarm_control_panel import (
+    DOMAIN as ALARM_CONTROL_PANEL_DOMAIN,
+    AlarmControlPanelEntityFeature,
+    AlarmControlPanelState,
 )
 from homeassistant.const import (
     ATTR_CODE,
@@ -19,13 +18,8 @@ from homeassistant.const import (
     SERVICE_ALARM_ARM_HOME,
     SERVICE_ALARM_ARM_NIGHT,
     SERVICE_ALARM_DISARM,
-    STATE_ALARM_ARMED_AWAY,
-    STATE_ALARM_ARMED_HOME,
-    STATE_ALARM_ARMED_NIGHT,
-    STATE_ALARM_DISARMED,
-    STATE_ALARM_TRIGGERED,
 )
-from homeassistant.core import callback
+from homeassistant.core import State, callback
 
 from .accessories import TYPES, HomeAccessory
 from .const import (
@@ -36,28 +30,43 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-HASS_TO_HOMEKIT = {
-    STATE_ALARM_ARMED_HOME: 0,
-    STATE_ALARM_ARMED_AWAY: 1,
-    STATE_ALARM_ARMED_NIGHT: 2,
-    STATE_ALARM_DISARMED: 3,
-    STATE_ALARM_TRIGGERED: 4,
+HK_ALARM_STAY_ARMED = 0
+HK_ALARM_AWAY_ARMED = 1
+HK_ALARM_NIGHT_ARMED = 2
+HK_ALARM_DISARMED = 3
+HK_ALARM_TRIGGERED = 4
+
+HASS_TO_HOMEKIT_CURRENT = {
+    AlarmControlPanelState.ARMED_HOME: HK_ALARM_STAY_ARMED,
+    AlarmControlPanelState.ARMED_VACATION: HK_ALARM_AWAY_ARMED,
+    AlarmControlPanelState.ARMED_AWAY: HK_ALARM_AWAY_ARMED,
+    AlarmControlPanelState.ARMED_NIGHT: HK_ALARM_NIGHT_ARMED,
+    AlarmControlPanelState.ARMING: HK_ALARM_DISARMED,
+    AlarmControlPanelState.DISARMED: HK_ALARM_DISARMED,
+    AlarmControlPanelState.TRIGGERED: HK_ALARM_TRIGGERED,
+}
+
+HASS_TO_HOMEKIT_TARGET = {
+    AlarmControlPanelState.ARMED_HOME: HK_ALARM_STAY_ARMED,
+    AlarmControlPanelState.ARMED_VACATION: HK_ALARM_AWAY_ARMED,
+    AlarmControlPanelState.ARMED_AWAY: HK_ALARM_AWAY_ARMED,
+    AlarmControlPanelState.ARMED_NIGHT: HK_ALARM_NIGHT_ARMED,
+    AlarmControlPanelState.ARMING: HK_ALARM_AWAY_ARMED,
+    AlarmControlPanelState.DISARMED: HK_ALARM_DISARMED,
 }
 
 HASS_TO_HOMEKIT_SERVICES = {
-    SERVICE_ALARM_ARM_HOME: 0,
-    SERVICE_ALARM_ARM_AWAY: 1,
-    SERVICE_ALARM_ARM_NIGHT: 2,
-    SERVICE_ALARM_DISARM: 3,
+    SERVICE_ALARM_ARM_HOME: HK_ALARM_STAY_ARMED,
+    SERVICE_ALARM_ARM_AWAY: HK_ALARM_AWAY_ARMED,
+    SERVICE_ALARM_ARM_NIGHT: HK_ALARM_NIGHT_ARMED,
+    SERVICE_ALARM_DISARM: HK_ALARM_DISARMED,
 }
 
-HOMEKIT_TO_HASS = {c: s for s, c in HASS_TO_HOMEKIT.items()}
-
-STATE_TO_SERVICE = {
-    STATE_ALARM_ARMED_AWAY: SERVICE_ALARM_ARM_AWAY,
-    STATE_ALARM_ARMED_HOME: SERVICE_ALARM_ARM_HOME,
-    STATE_ALARM_ARMED_NIGHT: SERVICE_ALARM_ARM_NIGHT,
-    STATE_ALARM_DISARMED: SERVICE_ALARM_DISARM,
+HK_TO_SERVICE = {
+    HK_ALARM_AWAY_ARMED: SERVICE_ALARM_ARM_AWAY,
+    HK_ALARM_STAY_ARMED: SERVICE_ALARM_ARM_HOME,
+    HK_ALARM_NIGHT_ARMED: SERVICE_ALARM_ARM_NIGHT,
+    HK_ALARM_DISARMED: SERVICE_ALARM_DISARM,
 }
 
 
@@ -65,75 +74,65 @@ STATE_TO_SERVICE = {
 class SecuritySystem(HomeAccessory):
     """Generate an SecuritySystem accessory for an alarm control panel."""
 
-    def __init__(self, *args):
+    def __init__(self, *args: Any) -> None:
         """Initialize a SecuritySystem accessory object."""
         super().__init__(*args, category=CATEGORY_ALARM_SYSTEM)
         state = self.hass.states.get(self.entity_id)
+        assert state
         self._alarm_code = self.config.get(ATTR_CODE)
 
         supported_states = state.attributes.get(
             ATTR_SUPPORTED_FEATURES,
             (
-                SUPPORT_ALARM_ARM_HOME
-                | SUPPORT_ALARM_ARM_AWAY
-                | SUPPORT_ALARM_ARM_NIGHT
-                | SUPPORT_ALARM_TRIGGER
+                AlarmControlPanelEntityFeature.ARM_HOME
+                | AlarmControlPanelEntityFeature.ARM_VACATION
+                | AlarmControlPanelEntityFeature.ARM_AWAY
+                | AlarmControlPanelEntityFeature.ARM_NIGHT
+                | AlarmControlPanelEntityFeature.TRIGGER
             ),
         )
 
-        loader = get_loader()
-        default_current_states = loader.get_char(
-            "SecuritySystemCurrentState"
-        ).properties.get("ValidValues")
-        default_target_services = loader.get_char(
-            "SecuritySystemTargetState"
-        ).properties.get("ValidValues")
-
-        current_supported_states = [
-            HASS_TO_HOMEKIT[STATE_ALARM_DISARMED],
-            HASS_TO_HOMEKIT[STATE_ALARM_TRIGGERED],
-        ]
-        target_supported_services = [HASS_TO_HOMEKIT_SERVICES[SERVICE_ALARM_DISARM]]
-
-        if supported_states & SUPPORT_ALARM_ARM_HOME:
-            current_supported_states.append(HASS_TO_HOMEKIT[STATE_ALARM_ARMED_HOME])
-            target_supported_services.append(
-                HASS_TO_HOMEKIT_SERVICES[SERVICE_ALARM_ARM_HOME]
-            )
-
-        if supported_states & SUPPORT_ALARM_ARM_AWAY:
-            current_supported_states.append(HASS_TO_HOMEKIT[STATE_ALARM_ARMED_AWAY])
-            target_supported_services.append(
-                HASS_TO_HOMEKIT_SERVICES[SERVICE_ALARM_ARM_AWAY]
-            )
-
-        if supported_states & SUPPORT_ALARM_ARM_NIGHT:
-            current_supported_states.append(HASS_TO_HOMEKIT[STATE_ALARM_ARMED_NIGHT])
-            target_supported_services.append(
-                HASS_TO_HOMEKIT_SERVICES[SERVICE_ALARM_ARM_NIGHT]
-            )
-
-        new_current_states = {
-            key: val
-            for key, val in default_current_states.items()
-            if val in current_supported_states
-        }
-        new_target_services = {
-            key: val
-            for key, val in default_target_services.items()
-            if val in target_supported_services
-        }
-
         serv_alarm = self.add_preload_service(SERV_SECURITY_SYSTEM)
+        current_char = serv_alarm.get_characteristic(CHAR_CURRENT_SECURITY_STATE)
+        target_char = serv_alarm.get_characteristic(CHAR_TARGET_SECURITY_STATE)
+        default_current_states = current_char.properties.get("ValidValues")
+        default_target_services = target_char.properties.get("ValidValues")
+
+        current_supported_states = [HK_ALARM_DISARMED, HK_ALARM_TRIGGERED]
+        target_supported_services = [HK_ALARM_DISARMED]
+
+        if supported_states & AlarmControlPanelEntityFeature.ARM_HOME:
+            current_supported_states.append(HK_ALARM_STAY_ARMED)
+            target_supported_services.append(HK_ALARM_STAY_ARMED)
+
+        if supported_states & (
+            AlarmControlPanelEntityFeature.ARM_AWAY
+            | AlarmControlPanelEntityFeature.ARM_VACATION
+        ):
+            current_supported_states.append(HK_ALARM_AWAY_ARMED)
+            target_supported_services.append(HK_ALARM_AWAY_ARMED)
+
+        if supported_states & AlarmControlPanelEntityFeature.ARM_NIGHT:
+            current_supported_states.append(HK_ALARM_NIGHT_ARMED)
+            target_supported_services.append(HK_ALARM_NIGHT_ARMED)
+
         self.char_current_state = serv_alarm.configure_char(
             CHAR_CURRENT_SECURITY_STATE,
-            value=HASS_TO_HOMEKIT[STATE_ALARM_DISARMED],
-            valid_values=new_current_states,
+            value=HASS_TO_HOMEKIT_CURRENT[AlarmControlPanelState.DISARMED],
+            valid_values={
+                key: val
+                for key, val in default_current_states.items()
+                if val in current_supported_states
+            },
         )
         self.char_target_state = serv_alarm.configure_char(
             CHAR_TARGET_SECURITY_STATE,
             value=HASS_TO_HOMEKIT_SERVICES[SERVICE_ALARM_DISARM],
-            valid_values=new_target_services,
+            valid_values={
+                key: val
+                for key, val in default_target_services.items()
+                if val in target_supported_services
+            },
             setter_callback=self.set_security_state,
         )
 
@@ -141,35 +140,37 @@ class SecuritySystem(HomeAccessory):
         # GET to avoid an event storm after homekit startup
         self.async_update_state(state)
 
-    def set_security_state(self, value):
+    def set_security_state(self, value: int) -> None:
         """Move security state to value if call came from HomeKit."""
         _LOGGER.debug("%s: Set security state to %d", self.entity_id, value)
-        hass_value = HOMEKIT_TO_HASS[value]
-        service = STATE_TO_SERVICE[hass_value]
-
+        service = HK_TO_SERVICE[value]
         params = {ATTR_ENTITY_ID: self.entity_id}
         if self._alarm_code:
             params[ATTR_CODE] = self._alarm_code
-        self.async_call_service(DOMAIN, service, params)
+        self.async_call_service(ALARM_CONTROL_PANEL_DOMAIN, service, params)
 
     @callback
-    def async_update_state(self, new_state):
+    def async_update_state(self, new_state: State) -> None:
         """Update security state after state changed."""
-        hass_state = new_state.state
-        if hass_state in HASS_TO_HOMEKIT:
-            current_security_state = HASS_TO_HOMEKIT[hass_state]
-            if self.char_current_state.value != current_security_state:
-                self.char_current_state.set_value(current_security_state)
-                _LOGGER.debug(
-                    "%s: Updated current state to %s (%d)",
-                    self.entity_id,
-                    hass_state,
-                    current_security_state,
-                )
-
-            # SecuritySystemTargetState does not support triggered
-            if (
-                hass_state != STATE_ALARM_TRIGGERED
-                and self.char_target_state.value != current_security_state
-            ):
-                self.char_target_state.set_value(current_security_state)
+        hass_state = None
+        if new_state and new_state.state == "None":
+            # Bail out early for no state
+            return
+        if new_state and new_state.state is not None:
+            hass_state = AlarmControlPanelState(new_state.state)
+        if (
+            hass_state
+            and (current_state := HASS_TO_HOMEKIT_CURRENT.get(hass_state)) is not None
+        ):
+            self.char_current_state.set_value(current_state)
+            _LOGGER.debug(
+                "%s: Updated current state to %s (%d)",
+                self.entity_id,
+                hass_state,
+                current_state,
+            )
+        if (
+            hass_state
+            and (target_state := HASS_TO_HOMEKIT_TARGET.get(hass_state)) is not None
+        ):
+            self.char_target_state.set_value(target_state)

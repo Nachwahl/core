@@ -1,24 +1,27 @@
 """Constants for GIOS integration."""
+
+from __future__ import annotations
+
 from datetime import timedelta
+from typing import Final
 
-ATTR_STATION = "station"
-CONF_STATION_ID = "station_id"
-DEFAULT_NAME = "GIOŚ"
+ATTRIBUTION: Final = "Data provided by GIOŚ"
+
+CONF_STATION_ID: Final = "station_id"
 # Term of service GIOŚ allow downloading data no more than twice an hour.
-SCAN_INTERVAL = timedelta(minutes=30)
-DOMAIN = "gios"
-MANUFACTURER = "Główny Inspektorat Ochrony Środowiska"
+SCAN_INTERVAL: Final = timedelta(minutes=30)
+DOMAIN: Final = "gios"
+MANUFACTURER: Final = "Główny Inspektorat Ochrony Środowiska"
 
-AQI_GOOD = "dobry"
-AQI_MODERATE = "umiarkowany"
-AQI_POOR = "dostateczny"
-AQI_VERY_GOOD = "bardzo dobry"
-AQI_VERY_POOR = "zły"
+URL = "http://powietrze.gios.gov.pl/pjp/current/station_details/info/{station_id}"
 
-ICONS_MAP = {
-    AQI_VERY_GOOD: "mdi:emoticon-excited",
-    AQI_GOOD: "mdi:emoticon-happy",
-    AQI_MODERATE: "mdi:emoticon-neutral",
-    AQI_POOR: "mdi:emoticon-sad",
-    AQI_VERY_POOR: "mdi:emoticon-dead",
-}
+API_TIMEOUT: Final = 30
+
+ATTR_C6H6: Final = "c6h6"
+ATTR_CO: Final = "co"
+ATTR_NO2: Final = "no2"
+ATTR_O3: Final = "o3"
+ATTR_PM10: Final = "pm10"
+ATTR_PM25: Final = "pm25"
+ATTR_SO2: Final = "so2"
+ATTR_AQI: Final = "aqi"

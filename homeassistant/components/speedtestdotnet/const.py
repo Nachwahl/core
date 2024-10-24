@@ -1,32 +1,23 @@
-"""Consts used by Speedtest.net."""
-from homeassistant.const import DATA_RATE_MEGABITS_PER_SECOND, TIME_MILLISECONDS
+"""Constants used by Speedtest.net."""
 
-DOMAIN = "speedtestdotnet"
+from __future__ import annotations
 
-SPEED_TEST_SERVICE = "speedtest"
-DATA_UPDATED = f"{DOMAIN}_data_updated"
+from typing import Final
 
-SENSOR_TYPES = {
-    "ping": ["Ping", TIME_MILLISECONDS],
-    "download": ["Download", DATA_RATE_MEGABITS_PER_SECOND],
-    "upload": ["Upload", DATA_RATE_MEGABITS_PER_SECOND],
-}
+DOMAIN: Final = "speedtestdotnet"
 
-CONF_SERVER_NAME = "server_name"
-CONF_SERVER_ID = "server_id"
-CONF_MANUAL = "manual"
+CONF_SERVER_NAME: Final = "server_name"
+CONF_SERVER_ID: Final = "server_id"
 
-ATTR_BYTES_RECEIVED = "bytes_received"
-ATTR_BYTES_SENT = "bytes_sent"
-ATTR_SERVER_COUNTRY = "server_country"
-ATTR_SERVER_ID = "server_id"
-ATTR_SERVER_NAME = "server_name"
+ATTR_BYTES_RECEIVED: Final = "bytes_received"
+ATTR_BYTES_SENT: Final = "bytes_sent"
+ATTR_SERVER_COUNTRY: Final = "server_country"
+ATTR_SERVER_ID: Final = "server_id"
+ATTR_SERVER_NAME: Final = "server_name"
 
 
-DEFAULT_NAME = "SpeedTest"
-DEFAULT_SCAN_INTERVAL = 60
-DEFAULT_SERVER = "*Auto Detect"
+DEFAULT_NAME: Final = "SpeedTest"
+DEFAULT_SCAN_INTERVAL: Final = 60
+DEFAULT_SERVER: Final = "*Auto Detect"
 
-ATTRIBUTION = "Data retrieved from Speedtest.net by Ookla"
-
-ICON = "mdi:speedometer"
+ATTRIBUTION: Final = "Data retrieved from Speedtest.net by Ookla"

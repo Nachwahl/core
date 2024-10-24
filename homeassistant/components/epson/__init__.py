@@ -1,55 +1,97 @@
 """The epson integration."""
+
 import logging
 
 from epson_projector import Projector
-from epson_projector.const import POWER, STATE_UNAVAILABLE as EPSON_STATE_UNAVAILABLE
+from epson_projector.const import (
+    PWR_OFF_STATE,
+    STATE_UNAVAILABLE as EPSON_STATE_UNAVAILABLE,
+)
 
-from homeassistant.components.media_player import DOMAIN as MEDIA_PLAYER_PLATFORM
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PORT
+from homeassistant.const import CONF_HOST, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN
-from .exceptions import CannotConnect
+from .const import CONF_CONNECTION_TYPE, DOMAIN, HTTP
+from .exceptions import CannotConnect, PoweredOff
 
-PLATFORMS = [MEDIA_PLAYER_PLATFORM]
+PLATFORMS = [Platform.MEDIA_PLAYER]
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def validate_projector(hass: HomeAssistant, host, port):
-    """Validate the given host and port allows us to connect."""
+async def validate_projector(
+    hass: HomeAssistant,
+    host: str,
+    conn_type: str,
+    check_power: bool = True,
+    check_powered_on: bool = True,
+):
+    """Validate the given projector host allows us to connect."""
     epson_proj = Projector(
         host=host,
         websession=async_get_clientsession(hass, verify_ssl=False),
-        port=port,
+        type=conn_type,
     )
-    _power = await epson_proj.get_property(POWER)
-    if not _power or _power == EPSON_STATE_UNAVAILABLE:
-        raise CannotConnect
+    if check_power:
+        _power = await epson_proj.get_power()
+        if not _power or _power == EPSON_STATE_UNAVAILABLE:
+            _LOGGER.debug("Cannot connect to projector")
+            raise CannotConnect
+        if _power == PWR_OFF_STATE and check_powered_on:
+            _LOGGER.debug("Projector is off")
+            raise PoweredOff
     return epson_proj
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up epson from a config entry."""
-    try:
-        projector = await validate_projector(
-            hass, entry.data[CONF_HOST], entry.data[CONF_PORT]
-        )
-    except CannotConnect:
-        _LOGGER.warning("Cannot connect to projector %s", entry.data[CONF_HOST])
-        return False
+    projector = await validate_projector(
+        hass=hass,
+        host=entry.data[CONF_HOST],
+        conn_type=entry.data[CONF_CONNECTION_TYPE],
+        check_power=False,
+        check_powered_on=False,
+    )
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = projector
-    hass.config_entries.async_setup_platforms(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        projector = hass.data[DOMAIN].pop(entry.entry_id)
+        projector.close()
     return unload_ok
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate old entry."""
+    _LOGGER.debug(
+        "Migrating configuration from version %s.%s",
+        config_entry.version,
+        config_entry.minor_version,
+    )
+
+    if config_entry.version > 1 or config_entry.minor_version > 1:
+        # This means the user has downgraded from a future version
+        return False
+
+    if config_entry.version == 1 and config_entry.minor_version == 1:
+        new_data = {**config_entry.data}
+        new_data[CONF_CONNECTION_TYPE] = HTTP
+
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=1, minor_version=2
+        )
+
+    _LOGGER.debug(
+        "Migration to configuration version %s successful", config_entry.version
+    )
+
+    return True

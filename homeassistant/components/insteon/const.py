@@ -1,4 +1,7 @@
 """Constants used by insteon component."""
+
+import re
+
 from pyinsteon.groups import (
     CO_SENSOR,
     COVER,
@@ -32,21 +35,24 @@ from pyinsteon.groups import (
     TEST_SENSOR,
 )
 
+from homeassistant.const import Platform
+
 DOMAIN = "insteon"
 
 INSTEON_PLATFORMS = [
-    "binary_sensor",
-    "climate",
-    "cover",
-    "fan",
-    "light",
-    "switch",
+    Platform.BINARY_SENSOR,
+    Platform.CLIMATE,
+    Platform.COVER,
+    Platform.FAN,
+    Platform.LIGHT,
+    Platform.LOCK,
+    Platform.SWITCH,
 ]
 
 X10_PLATFORMS = [
-    "binary_sensor",
-    "switch",
-    "light",
+    Platform.BINARY_SENSOR,
+    Platform.SWITCH,
+    Platform.LIGHT,
 ]
 
 CONF_IP_PORT = "ip_port"
@@ -66,6 +72,7 @@ CONF_DIM_STEPS = "dim_steps"
 CONF_X10_ALL_UNITS_OFF = "x10_all_units_off"
 CONF_X10_ALL_LIGHTS_ON = "x10_all_lights_on"
 CONF_X10_ALL_LIGHTS_OFF = "x10_all_lights_off"
+CONF_DEV_PATH = "dev_path"
 
 PORT_HUB_V1 = 9761
 PORT_HUB_V2 = 25105
@@ -94,6 +101,8 @@ SIGNAL_SAVE_DEVICES = "save_devices"
 SIGNAL_ADD_ENTITIES = "insteon_add_entities"
 SIGNAL_ADD_DEFAULT_LINKS = "add_default_links"
 SIGNAL_ADD_DEVICE_OVERRIDE = "add_device_override"
+SIGNAL_REMOVE_HA_DEVICE = "insteon_remove_ha_device"
+SIGNAL_REMOVE_INSTEON_DEVICE = "insteon_remove_insteon_device"
 SIGNAL_REMOVE_DEVICE_OVERRIDE = "insteon_remove_device_override"
 SIGNAL_REMOVE_ENTITY = "insteon_remove_entity"
 SIGNAL_ADD_X10_DEVICE = "insteon_add_x10_device"
@@ -124,7 +133,6 @@ EVENT_GROUP_OFF = "insteon.button_off"
 EVENT_GROUP_ON_FAST = "insteon.button_on_fast"
 EVENT_GROUP_OFF_FAST = "insteon.button_off_fast"
 EVENT_CONF_BUTTON = "button"
-ON_OFF_EVENTS = "on_off_events"
 
 STATE_NAME_LABEL_MAP = {
     DIMMABLE_LIGHT_MAIN: "Main",
@@ -158,3 +166,16 @@ STATE_NAME_LABEL_MAP = {
     COVER: "Cover",
     RELAY: "Relay",
 }
+
+TYPE = "type"
+ID = "id"
+DEVICE_ID = "device_id"
+DEVICE_ADDRESS = "device_address"
+ALDB_RECORD = "record"
+PROPERTY_NAME = "name"
+PROPERTY_VALUE = "value"
+HA_DEVICE_NOT_FOUND = "ha_device_not_found"
+INSTEON_DEVICE_NOT_FOUND = "insteon_device_not_found"
+MULTIPLE = "multiple"
+
+INSTEON_ADDR_REGEX = re.compile(r"([A-Fa-f0-9]{2}\.?[A-Fa-f0-9]{2}\.?[A-Fa-f0-9]{2})$")

@@ -1,9 +1,14 @@
 set_all_zones:
-  description: Set all Blackbird zones to a single source.
   fields:
     entity_id:
-      description: Name of any blackbird zone.
+      required: true
       example: "media_player.zone_1"
+      selector:
+        entity:
+          integration: blackbird
+          domain: media_player
     source:
-      description: Name of source to switch to.
+      required: true
       example: "Source 1"
+      selector:
+        text:

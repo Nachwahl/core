@@ -1,50 +1,74 @@
 """BleBox light entities implementation."""
-import logging
 
-from blebox_uniapi.error import BadOnValueError
+from __future__ import annotations
+
+from datetime import timedelta
+import logging
+from typing import Any
+
+import blebox_uniapi.light
+from blebox_uniapi.light import BleboxColorMode
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
-    ATTR_HS_COLOR,
-    ATTR_WHITE_VALUE,
-    SUPPORT_BRIGHTNESS,
-    SUPPORT_COLOR,
-    SUPPORT_WHITE_VALUE,
+    ATTR_COLOR_TEMP,
+    ATTR_EFFECT,
+    ATTR_RGB_COLOR,
+    ATTR_RGBW_COLOR,
+    ATTR_RGBWW_COLOR,
+    ColorMode,
     LightEntity,
+    LightEntityFeature,
 )
-from homeassistant.util.color import (
-    color_hs_to_RGB,
-    color_rgb_to_hex,
-    color_RGB_to_hs,
-    rgb_hex_to_rgb_list,
-)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import BleBoxEntity, create_blebox_entities
+from . import BleBoxConfigEntry
+from .entity import BleBoxEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+SCAN_INTERVAL = timedelta(seconds=5)
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    config_entry: BleBoxConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Set up a BleBox entry."""
+    entities = [
+        BleBoxLightEntity(feature)
+        for feature in config_entry.runtime_data.features.get("lights", [])
+    ]
+    async_add_entities(entities, True)
 
-    create_blebox_entities(
-        hass, config_entry, async_add_entities, BleBoxLightEntity, "lights"
-    )
+
+COLOR_MODE_MAP = {
+    BleboxColorMode.RGBW: ColorMode.RGBW,
+    BleboxColorMode.RGB: ColorMode.RGB,
+    BleboxColorMode.MONO: ColorMode.BRIGHTNESS,
+    BleboxColorMode.RGBorW: ColorMode.RGBW,  # white hex is prioritised over RGB channel
+    BleboxColorMode.CT: ColorMode.COLOR_TEMP,
+    BleboxColorMode.CTx2: ColorMode.COLOR_TEMP,  # two instances
+    BleboxColorMode.RGBWW: ColorMode.RGBWW,
+}
 
 
-class BleBoxLightEntity(BleBoxEntity, LightEntity):
+class BleBoxLightEntity(BleBoxEntity[blebox_uniapi.light.Light], LightEntity):
     """Representation of BleBox lights."""
 
-    @property
-    def supported_features(self):
-        """Return supported features."""
-        white = SUPPORT_WHITE_VALUE if self._feature.supports_white else 0
-        color = SUPPORT_COLOR if self._feature.supports_color else 0
-        brightness = SUPPORT_BRIGHTNESS if self._feature.supports_brightness else 0
-        return white | color | brightness
+    _attr_max_mireds = 370  # 1,000,000 divided by 2700 Kelvin = 370 Mireds
+    _attr_min_mireds = 154  # 1,000,000 divided by 6500 Kelvin = 154 Mireds
+
+    def __init__(self, feature: blebox_uniapi.light.Light) -> None:
+        """Initialize a BleBox light."""
+        super().__init__(feature)
+        if feature.effect_list:
+            self._attr_supported_features = LightEntityFeature.EFFECT
 
     @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return if light is on."""
         return self._feature.is_on
 
@@ -54,47 +78,110 @@ class BleBoxLightEntity(BleBoxEntity, LightEntity):
         return self._feature.brightness
 
     @property
-    def white_value(self):
-        """Return the white value."""
-        return self._feature.white_value
+    def color_temp(self):
+        """Return color temperature."""
+        return self._feature.color_temp
 
     @property
-    def hs_color(self):
-        """Return the hue and saturation."""
-        rgbw_hex = self._feature.rgbw_hex
-        if rgbw_hex is None:
+    def color_mode(self):
+        """Return the color mode.
+
+        Set values to _attr_ibutes if needed.
+        """
+        return COLOR_MODE_MAP.get(self._feature.color_mode, ColorMode.ONOFF)
+
+    @property
+    def supported_color_modes(self):
+        """Return supported color modes."""
+        return {self.color_mode}
+
+    @property
+    def effect_list(self) -> list[str]:
+        """Return the list of supported effects."""
+        return self._feature.effect_list
+
+    @property
+    def effect(self) -> str | None:
+        """Return the current effect."""
+        return self._feature.effect
+
+    @property
+    def rgb_color(self):
+        """Return value for rgb."""
+        if (rgb_hex := self._feature.rgb_hex) is None:
             return None
+        return tuple(
+            blebox_uniapi.light.Light.normalise_elements_of_rgb(
+                blebox_uniapi.light.Light.rgb_hex_to_rgb_list(rgb_hex)[0:3]
+            )
+        )
 
-        rgb = rgb_hex_to_rgb_list(rgbw_hex)[0:3]
-        return color_RGB_to_hs(*rgb)
+    @property
+    def rgbw_color(self):
+        """Return the hue and saturation."""
+        if (rgbw_hex := self._feature.rgbw_hex) is None:
+            return None
+        return tuple(blebox_uniapi.light.Light.rgb_hex_to_rgb_list(rgbw_hex)[0:4])
 
-    async def async_turn_on(self, **kwargs):
+    @property
+    def rgbww_color(self):
+        """Return value for rgbww."""
+        if (rgbww_hex := self._feature.rgbww_hex) is None:
+            return None
+        return tuple(blebox_uniapi.light.Light.rgb_hex_to_rgb_list(rgbww_hex))
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the light on."""
 
-        white = kwargs.get(ATTR_WHITE_VALUE)
-        hs_color = kwargs.get(ATTR_HS_COLOR)
+        rgbw = kwargs.get(ATTR_RGBW_COLOR)
         brightness = kwargs.get(ATTR_BRIGHTNESS)
-
+        effect = kwargs.get(ATTR_EFFECT)
+        color_temp = kwargs.get(ATTR_COLOR_TEMP)
+        rgbww = kwargs.get(ATTR_RGBWW_COLOR)
         feature = self._feature
         value = feature.sensible_on_value
+        rgb = kwargs.get(ATTR_RGB_COLOR)
+
+        if rgbw is not None:
+            value = list(rgbw)
+        if color_temp is not None:
+            value = feature.return_color_temp_with_brightness(
+                int(color_temp), self.brightness
+            )
+
+        if rgbww is not None:
+            value = list(rgbww)
+
+        if rgb is not None:
+            if self.color_mode == ColorMode.RGB and brightness is None:
+                brightness = self.brightness
+            value = list(rgb)
 
         if brightness is not None:
-            value = feature.apply_brightness(value, brightness)
-
-        if white is not None:
-            value = feature.apply_white(value, white)
-
-        if hs_color is not None:
-            raw_rgb = color_rgb_to_hex(*color_hs_to_RGB(*hs_color))
-            value = feature.apply_color(value, raw_rgb)
+            if self.color_mode == ATTR_COLOR_TEMP:
+                value = feature.return_color_temp_with_brightness(
+                    self.color_temp, brightness
+                )
+            else:
+                value = feature.apply_brightness(value, brightness)
 
         try:
             await self._feature.async_on(value)
-        except BadOnValueError as ex:
-            _LOGGER.error(
-                "Turning on '%s' failed: Bad value %s (%s)", self.name, value, ex
-            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Turning on '{self.name}' failed: Bad value {value}"
+            ) from exc
 
-    async def async_turn_off(self, **kwargs):
+        if effect is not None:
+            try:
+                effect_value = self.effect_list.index(effect)
+                await self._feature.async_api_command("effect", effect_value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Turning on with effect '{self.name}' failed: {effect} not in"
+                    " effect list."
+                ) from exc
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the light off."""
         await self._feature.async_off()

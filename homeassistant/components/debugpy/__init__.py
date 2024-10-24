@@ -1,11 +1,12 @@
 """The Remote Python Debugger integration."""
+
 from __future__ import annotations
 
-from asyncio import Event
+from asyncio import Event, get_running_loop
 import logging
 from threading import Thread
 
-import debugpy
+import debugpy  # noqa: T100
 import voluptuous as vol
 
 from homeassistant.const import CONF_HOST, CONF_PORT
@@ -15,8 +16,8 @@ from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
 DOMAIN = "debugpy"
-CONF_WAIT = "wait"
 CONF_START = "start"
+CONF_WAIT = "wait"
 SERVICE_START = "start"
 
 CONFIG_SCHEMA = vol.Schema(
@@ -43,11 +44,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def debug_start(
         call: ServiceCall | None = None, *, wait: bool = True
     ) -> None:
-        """Start the debugger."""
-        debugpy.listen((conf[CONF_HOST], conf[CONF_PORT]))
+        """Enable asyncio debugging and start the debugger."""
+        get_running_loop().set_debug(True)
 
-        wait = conf[CONF_WAIT]
-        if wait:
+        await hass.async_add_executor_job(
+            debugpy.listen, (conf[CONF_HOST], conf[CONF_PORT])
+        )
+
+        if conf[CONF_WAIT]:
             _LOGGER.warning(
                 "Waiting for remote debug connection on %s:%s",
                 conf[CONF_HOST],
@@ -56,7 +60,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             ready = Event()
 
             def waitfor():
-                debugpy.wait_for_client()
+                debugpy.wait_for_client()  # noqa: T100
                 hass.loop.call_soon_threadsafe(ready.set)
 
             Thread(target=waitfor).start()

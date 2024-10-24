@@ -1,11 +1,17 @@
 """Support for FleetGO Platform."""
+
+from __future__ import annotations
+
 import logging
 
 import requests
 from ritassist import API
 import voluptuous as vol
 
-from homeassistant.components.device_tracker import PLATFORM_SCHEMA
+from homeassistant.components.device_tracker import (
+    PLATFORM_SCHEMA as DEVICE_TRACKER_PLATFORM_SCHEMA,
+    SeeCallback,
+)
 from homeassistant.const import (
     CONF_CLIENT_ID,
     CONF_CLIENT_SECRET,
@@ -13,12 +19,14 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_USERNAME,
 )
+from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.event import track_utc_time_change
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+PLATFORM_SCHEMA = DEVICE_TRACKER_PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_USERNAME): cv.string,
         vol.Required(CONF_PASSWORD): cv.string,
@@ -29,7 +37,12 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-def setup_scanner(hass, config: dict, see, discovery_info=None):
+def setup_scanner(
+    hass: HomeAssistant,
+    config: ConfigType,
+    see: SeeCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> bool:
     """Set up the DeviceScanner and check if login is valid."""
     scanner = FleetGoDeviceScanner(config, see)
     if not scanner.login(hass):
@@ -41,7 +54,7 @@ def setup_scanner(hass, config: dict, see, discovery_info=None):
 class FleetGoDeviceScanner:
     """Define a scanner for the FleetGO platform."""
 
-    def __init__(self, config, see):
+    def __init__(self, config, see: SeeCallback) -> None:
         """Initialize FleetGoDeviceScanner."""
         self._include = config.get(CONF_INCLUDE)
         self._see = see
@@ -74,7 +87,6 @@ class FleetGoDeviceScanner:
 
             for device in devices:
                 if not self._include or device.license_plate in self._include:
-
                     if device.active or device.current_address is None:
                         device.get_map_details()
 

@@ -1,46 +1,64 @@
-"""The Bravia TV component."""
+"""The Bravia TV integration."""
 
-from bravia_tv import BraviaRC
+from __future__ import annotations
 
-from homeassistant.const import CONF_HOST, CONF_MAC
+from typing import Final
 
-from .const import BRAVIARC, DOMAIN, UNDO_UPDATE_LISTENER
+from aiohttp import CookieJar
+from pybravia import BraviaClient
 
-PLATFORMS = ["media_player"]
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_HOST, CONF_MAC, Platform
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
+
+from .coordinator import BraviaTVCoordinator
+
+BraviaTVConfigEntry = ConfigEntry[BraviaTVCoordinator]
+
+PLATFORMS: Final[list[Platform]] = [
+    Platform.BUTTON,
+    Platform.MEDIA_PLAYER,
+    Platform.REMOTE,
+]
 
 
-async def async_setup_entry(hass, config_entry):
+async def async_setup_entry(
+    hass: HomeAssistant, config_entry: BraviaTVConfigEntry
+) -> bool:
     """Set up a config entry."""
     host = config_entry.data[CONF_HOST]
     mac = config_entry.data[CONF_MAC]
 
-    undo_listener = config_entry.add_update_listener(update_listener)
+    session = async_create_clientsession(
+        hass, cookie_jar=CookieJar(unsafe=True, quote_cookie=False)
+    )
+    client = BraviaClient(host, mac, session=session)
+    coordinator = BraviaTVCoordinator(
+        hass=hass,
+        client=client,
+        config=config_entry.data,
+    )
+    config_entry.async_on_unload(config_entry.add_update_listener(update_listener))
 
-    hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][config_entry.entry_id] = {
-        BRAVIARC: BraviaRC(host, mac),
-        UNDO_UPDATE_LISTENER: undo_listener,
-    }
+    await coordinator.async_config_entry_first_refresh()
 
-    hass.config_entries.async_setup_platforms(config_entry, PLATFORMS)
+    config_entry.runtime_data = coordinator
+
+    await hass.config_entries.async_forward_entry_setups(config_entry, PLATFORMS)
 
     return True
 
 
-async def async_unload_entry(hass, config_entry):
+async def async_unload_entry(
+    hass: HomeAssistant, config_entry: BraviaTVConfigEntry
+) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(
-        config_entry, PLATFORMS
-    )
-
-    hass.data[DOMAIN][config_entry.entry_id][UNDO_UPDATE_LISTENER]()
-
-    if unload_ok:
-        hass.data[DOMAIN].pop(config_entry.entry_id)
-
-    return unload_ok
+    return await hass.config_entries.async_unload_platforms(config_entry, PLATFORMS)
 
 
-async def update_listener(hass, config_entry):
+async def update_listener(
+    hass: HomeAssistant, config_entry: BraviaTVConfigEntry
+) -> None:
     """Handle options update."""
     await hass.config_entries.async_reload(config_entry.entry_id)

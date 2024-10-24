@@ -1,104 +1,69 @@
 """Support for AVM FRITZ!SmartHome switch devices."""
+
+from __future__ import annotations
+
+from typing import Any
+
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    ATTR_DEVICE_CLASS,
-    ATTR_ENTITY_ID,
-    ATTR_NAME,
-    ATTR_TEMPERATURE,
-    ATTR_UNIT_OF_MEASUREMENT,
-    ENERGY_KILO_WATT_HOUR,
-    TEMP_CELSIUS,
-)
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from . import FritzBoxEntity
-from .const import (
-    ATTR_STATE_DEVICE_LOCKED,
-    ATTR_STATE_LOCKED,
-    ATTR_TEMPERATURE_UNIT,
-    ATTR_TOTAL_CONSUMPTION,
-    ATTR_TOTAL_CONSUMPTION_UNIT,
-    CONF_COORDINATOR,
-    DOMAIN as FRITZBOX_DOMAIN,
-)
-
-ATTR_TOTAL_CONSUMPTION_UNIT_VALUE = ENERGY_KILO_WATT_HOUR
+from .const import DOMAIN
+from .coordinator import FritzboxConfigEntry
+from .entity import FritzBoxDeviceEntity
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: FritzboxConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the FRITZ!SmartHome switch from ConfigEntry."""
-    entities = []
-    coordinator = hass.data[FRITZBOX_DOMAIN][entry.entry_id][CONF_COORDINATOR]
+    coordinator = entry.runtime_data
 
-    for ain, device in coordinator.data.items():
-        if not device.has_switch:
-            continue
-
-        entities.append(
-            FritzboxSwitch(
-                {
-                    ATTR_NAME: f"{device.name}",
-                    ATTR_ENTITY_ID: f"{device.ain}",
-                    ATTR_UNIT_OF_MEASUREMENT: None,
-                    ATTR_DEVICE_CLASS: None,
-                },
-                coordinator,
-                ain,
-            )
+    @callback
+    def _add_entities(devices: set[str] | None = None) -> None:
+        """Add devices."""
+        if devices is None:
+            devices = coordinator.new_devices
+        if not devices:
+            return
+        async_add_entities(
+            FritzboxSwitch(coordinator, ain)
+            for ain in devices
+            if coordinator.data.devices[ain].has_switch
         )
 
-    async_add_entities(entities)
+    entry.async_on_unload(coordinator.async_add_listener(_add_entities))
+
+    _add_entities(set(coordinator.data.devices))
 
 
-class FritzboxSwitch(FritzBoxEntity, SwitchEntity):
+class FritzboxSwitch(FritzBoxDeviceEntity, SwitchEntity):
     """The switch class for FRITZ!SmartHome switches."""
 
     @property
-    def available(self):
-        """Return if switch is available."""
-        return self.device.present
-
-    @property
-    def is_on(self):
+    def is_on(self) -> bool:
         """Return true if the switch is on."""
-        return self.device.switch_state
+        return self.data.switch_state  # type: ignore [no-any-return]
 
-    async def async_turn_on(self, **kwargs):
+    async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the switch on."""
-        await self.hass.async_add_executor_job(self.device.set_switch_state_on)
+        self.check_lock_state()
+        await self.hass.async_add_executor_job(self.data.set_switch_state_on)
         await self.coordinator.async_refresh()
 
-    async def async_turn_off(self, **kwargs):
+    async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the switch off."""
-        await self.hass.async_add_executor_job(self.device.set_switch_state_off)
+        self.check_lock_state()
+        await self.hass.async_add_executor_job(self.data.set_switch_state_off)
         await self.coordinator.async_refresh()
 
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes of the device."""
-        attrs = {}
-        attrs[ATTR_STATE_DEVICE_LOCKED] = self.device.device_lock
-        attrs[ATTR_STATE_LOCKED] = self.device.lock
-
-        if self.device.has_powermeter:
-            attrs[
-                ATTR_TOTAL_CONSUMPTION
-            ] = f"{((self.device.energy or 0.0) / 1000):.3f}"
-            attrs[ATTR_TOTAL_CONSUMPTION_UNIT] = ATTR_TOTAL_CONSUMPTION_UNIT_VALUE
-        if self.device.has_temperature_sensor:
-            attrs[ATTR_TEMPERATURE] = str(
-                self.hass.config.units.temperature(
-                    self.device.temperature, TEMP_CELSIUS
-                )
+    def check_lock_state(self) -> None:
+        """Raise an Error if manual switching via FRITZ!Box user interface is disabled."""
+        if self.data.lock:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="manual_switching_disabled",
             )
-            attrs[ATTR_TEMPERATURE_UNIT] = self.hass.config.units.temperature_unit
-        return attrs
-
-    @property
-    def current_power_w(self):
-        """Return the current power usage in W."""
-        return self.device.power / 1000

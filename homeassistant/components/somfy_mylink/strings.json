@@ -1,7 +1,6 @@
 {
-  "title": "Somfy MyLink",
   "config": {
-    "flow_title": "Somfy MyLink {mac} ({ip})",
+    "flow_title": "{mac} ({ip})",
     "step": {
       "user": {
         "description": "The System ID can be obtained in the MyLink app under Integration by selecting any non-Cloud service.",
@@ -9,6 +8,9 @@
           "host": "[%key:common::config_flow::data::host%]",
           "port": "[%key:common::config_flow::data::port%]",
           "system_id": "System ID"
+        },
+        "data_description": {
+          "host": "The hostname or IP address of your Somfy MyLink hub."
         }
       }
     },
@@ -40,5 +42,5 @@
         }
       }
     }
-  }  
+  }
 }

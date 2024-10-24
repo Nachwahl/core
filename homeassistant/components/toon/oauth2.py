@@ -1,4 +1,5 @@
 """OAuth2 implementations for Toon."""
+
 from __future__ import annotations
 
 from typing import Any, cast
@@ -33,6 +34,7 @@ def register_oauth2_implementations(
             client_secret=client_secret,
             name="Engie Electrabel Boxx",
             tenant_id="electrabel",
+            issuer="identity.toon.eu",
         ),
     )
     config_flow.ToonFlowHandler.async_register_implementation(
@@ -58,7 +60,7 @@ class ToonLocalOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implemen
         name: str,
         tenant_id: str,
         issuer: str | None = None,
-    ):
+    ) -> None:
         """Local Toon Oauth Implementation."""
         self._name = name
         self.tenant_id = tenant_id

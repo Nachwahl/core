@@ -1,19 +1,50 @@
 set_aircleaner_mode:
-  description: "The air cleaner mode."
+  target:
+    entity:
+      integration: nexia
+      domain: climate
   fields:
-    entity_id:
-      description: "This setting will affect all zones connected to the thermostat."
-      example: climate.master_bedroom
     aircleaner_mode:
-      description: 'The air cleaner mode to set. Options include "auto", "quick", or "allergy".'
-      example: allergy
+      required: true
+      selector:
+        select:
+          options:
+            - "allergy"
+            - "auto"
+            - "quick"
 
 set_humidify_setpoint:
-  description: "The humidification set point."
+  target:
+    entity:
+      integration: nexia
+      domain: climate
   fields:
-    entity_id:
-      description: "This setting will affect all zones connected to the thermostat."
-      example: climate.master_bedroom
     humidity:
-      description: "The humidification setpoint as an int, range 35-65."
-      example: 45
+      required: true
+      selector:
+        number:
+          min: 35
+          max: 65
+          unit_of_measurement: "%"
+
+set_hvac_run_mode:
+  target:
+    entity:
+      integration: nexia
+      domain: climate
+  fields:
+    run_mode:
+      required: false
+      selector:
+        select:
+          options:
+            - "permanent_hold"
+            - "run_schedule"
+    hvac_mode:
+      required: false
+      selector:
+        select:
+          options:
+            - "auto"
+            - "cool"
+            - "heat"

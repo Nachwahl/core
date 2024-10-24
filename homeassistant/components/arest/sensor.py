@@ -1,21 +1,30 @@
 """Support for an exposed aREST RESTful API of a device."""
+
+from __future__ import annotations
+
 from datetime import timedelta
+from http import HTTPStatus
 import logging
 
 import requests
 import voluptuous as vol
 
-from homeassistant.components.sensor import PLATFORM_SCHEMA, SensorEntity
+from homeassistant.components.sensor import (
+    PLATFORM_SCHEMA as SENSOR_PLATFORM_SCHEMA,
+    SensorEntity,
+)
 from homeassistant.const import (
     CONF_MONITORED_VARIABLES,
     CONF_NAME,
     CONF_RESOURCE,
     CONF_UNIT_OF_MEASUREMENT,
     CONF_VALUE_TEMPLATE,
-    HTTP_OK,
 )
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import TemplateError
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.util import Throttle
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,7 +44,7 @@ PIN_VARIABLE_SCHEMA = vol.Schema(
     }
 )
 
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
+PLATFORM_SCHEMA = SENSOR_PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_RESOURCE): cv.url,
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
@@ -49,7 +58,12 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
+def setup_platform(
+    hass: HomeAssistant,
+    config: ConfigType,
+    add_entities: AddEntitiesCallback,
+    discovery_info: DiscoveryInfoType | None = None,
+) -> None:
     """Set up the aREST sensor."""
     resource = config[CONF_RESOURCE]
     var_conf = config[CONF_MONITORED_VARIABLES]
@@ -61,10 +75,10 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         _LOGGER.error(
             "Missing resource or schema in configuration. Add http:// to your URL"
         )
-        return False
+        return
     except requests.exceptions.ConnectionError:
         _LOGGER.error("No route to device at %s", resource)
-        return False
+        return
 
     arest = ArestData(resource)
 
@@ -72,8 +86,6 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
         """Create a renderer based on variable_template value."""
         if value_template is None:
             return lambda value: value
-
-        value_template.hass = hass
 
         def _render(value):
             try:
@@ -139,48 +151,27 @@ class ArestSensor(SensorEntity):
     ):
         """Initialize the sensor."""
         self.arest = arest
-        self._resource = resource
-        self._name = f"{location.title()} {name.title()}"
+        self._attr_name = f"{location.title()} {name.title()}"
         self._variable = variable
-        self._pin = pin
-        self._state = None
-        self._unit_of_measurement = unit_of_measurement
+        self._attr_native_unit_of_measurement = unit_of_measurement
         self._renderer = renderer
 
-        if self._pin is not None:
-            request = requests.get(f"{self._resource}/mode/{self._pin}/i", timeout=10)
-            if request.status_code != HTTP_OK:
-                _LOGGER.error("Can't set mode of %s", self._resource)
+        if pin is not None:
+            request = requests.get(f"{resource}/mode/{pin}/i", timeout=10)
+            if request.status_code != HTTPStatus.OK:
+                _LOGGER.error("Can't set mode of %s", resource)
 
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit the value is expressed in."""
-        return self._unit_of_measurement
-
-    @property
-    def state(self):
-        """Return the state of the sensor."""
-        values = self.arest.data
-
-        if "error" in values:
-            return values["error"]
-
-        value = self._renderer(values.get("value", values.get(self._variable, None)))
-        return value
-
-    def update(self):
+    def update(self) -> None:
         """Get the latest data from aREST API."""
         self.arest.update()
-
-    @property
-    def available(self):
-        """Could the device be accessed during the last update call."""
-        return self.arest.available
+        self._attr_available = self.arest.available
+        values = self.arest.data
+        if "error" in values:
+            self._attr_native_value = values["error"]
+        else:
+            self._attr_native_value = self._renderer(
+                values.get("value", values.get(self._variable, None))
+            )
 
 
 class ArestData:

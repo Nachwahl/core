@@ -1,33 +1,25 @@
 """Config flow for the sma integration."""
+
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-import aiohttp
 import pysma
 import voluptuous as vol
 
-from homeassistant import config_entries, core, exceptions
-from homeassistant.const import (
-    CONF_HOST,
-    CONF_PASSWORD,
-    CONF_SENSORS,
-    CONF_SSL,
-    CONF_VERIFY_SSL,
-)
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_SSL, CONF_VERIFY_SSL
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import homeassistant.helpers.config_validation as cv
 
-from .const import CONF_CUSTOM, CONF_GROUP, DEVICE_INFO, DOMAIN, GROUPS
+from .const import CONF_GROUP, DOMAIN, GROUPS
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def validate_input(
-    hass: core.HomeAssistant, data: dict[str, Any]
-) -> dict[str, Any]:
+async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
     """Validate the user input allows us to connect."""
     session = async_get_clientsession(hass, verify_ssl=data[CONF_VERIFY_SSL])
 
@@ -36,39 +28,33 @@ async def validate_input(
 
     sma = pysma.SMA(session, url, data[CONF_PASSWORD], group=data[CONF_GROUP])
 
-    if await sma.new_session() is False:
-        raise InvalidAuth
-
+    # new_session raises SmaAuthenticationException on failure
+    await sma.new_session()
     device_info = await sma.device_info()
     await sma.close_session()
-
-    if not device_info:
-        raise CannotRetrieveDeviceInfo
 
     return device_info
 
 
-class SmaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class SmaConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for SMA."""
 
     VERSION = 1
+    MINOR_VERSION = 2
 
     def __init__(self) -> None:
         """Initialize."""
-        self._data = {
+        self._data: dict[str, Any] = {
             CONF_HOST: vol.UNDEFINED,
             CONF_SSL: False,
             CONF_VERIFY_SSL: True,
             CONF_GROUP: GROUPS[0],
             CONF_PASSWORD: vol.UNDEFINED,
-            CONF_SENSORS: [],
-            CONF_CUSTOM: {},
-            DEVICE_INFO: {},
         }
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """First step in config flow."""
         errors = {}
         if user_input is not None:
@@ -79,20 +65,20 @@ class SmaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._data[CONF_PASSWORD] = user_input[CONF_PASSWORD]
 
             try:
-                self._data[DEVICE_INFO] = await validate_input(self.hass, user_input)
-            except aiohttp.ClientError:
+                device_info = await validate_input(self.hass, user_input)
+            except pysma.exceptions.SmaConnectionException:
                 errors["base"] = "cannot_connect"
-            except InvalidAuth:
+            except pysma.exceptions.SmaAuthenticationException:
                 errors["base"] = "invalid_auth"
-            except CannotRetrieveDeviceInfo:
+            except pysma.exceptions.SmaReadException:
                 errors["base"] = "cannot_retrieve_device_info"
-            except Exception:  # pylint: disable=broad-except
+            except Exception:
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
 
             if not errors:
-                await self.async_set_unique_id(self._data[DEVICE_INFO]["serial"])
-                self._abort_if_unique_id_configured()
+                await self.async_set_unique_id(str(device_info["serial"]))
+                self._abort_if_unique_id_configured(updates=self._data)
                 return self.async_create_entry(
                     title=self._data[CONF_HOST], data=self._data
                 )
@@ -114,27 +100,3 @@ class SmaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             ),
             errors=errors,
         )
-
-    async def async_step_import(
-        self, import_config: dict[str, Any] | None
-    ) -> FlowResult:
-        """Import a config flow from configuration."""
-        device_info = await validate_input(self.hass, import_config)
-        import_config[DEVICE_INFO] = device_info
-
-        # If unique is configured import was already run
-        # This means remap was already done, so we can abort
-        await self.async_set_unique_id(device_info["serial"])
-        self._abort_if_unique_id_configured(import_config)
-
-        return self.async_create_entry(
-            title=import_config[CONF_HOST], data=import_config
-        )
-
-
-class InvalidAuth(exceptions.HomeAssistantError):
-    """Error to indicate there is invalid auth."""
-
-
-class CannotRetrieveDeviceInfo(exceptions.HomeAssistantError):
-    """Error to indicate we cannot retrieve the device information."""

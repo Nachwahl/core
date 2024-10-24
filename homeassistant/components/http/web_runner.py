@@ -1,4 +1,5 @@
 """HomeAssistant specific aiohttp Site."""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,21 +24,20 @@ class HomeAssistantTCPSite(web.BaseSite):
 
     __slots__ = ("_host", "_port", "_reuse_address", "_reuse_port", "_hosturl")
 
-    def __init__(  # noqa: D107
+    def __init__(
         self,
         runner: web.BaseRunner,
-        host: None | str | list[str],
+        host: str | list[str] | None,
         port: int,
         *,
-        shutdown_timeout: float = 10.0,
         ssl_context: SSLContext | None = None,
         backlog: int = 128,
         reuse_address: bool | None = None,
         reuse_port: bool | None = None,
     ) -> None:
+        """Initialize HomeAssistantTCPSite."""
         super().__init__(
             runner,
-            shutdown_timeout=shutdown_timeout,
             ssl_context=ssl_context,
             backlog=backlog,
         )
@@ -47,12 +47,14 @@ class HomeAssistantTCPSite(web.BaseSite):
         self._reuse_port = reuse_port
 
     @property
-    def name(self) -> str:  # noqa: D102
+    def name(self) -> str:
+        """Return server URL."""
         scheme = "https" if self._ssl_context else "http"
         host = self._host[0] if isinstance(self._host, list) else "0.0.0.0"
         return str(URL.build(scheme=scheme, host=host, port=self._port))
 
-    async def start(self) -> None:  # noqa: D102
+    async def start(self) -> None:
+        """Start server."""
         await super().start()
         loop = asyncio.get_running_loop()
         server = self._runner.server

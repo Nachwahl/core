@@ -1,76 +1,58 @@
 """Support for Fast.com internet speed testing sensor."""
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.const import DATA_RATE_MEGABITS_PER_SECOND
-from homeassistant.core import callback
-from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.restore_state import RestoreEntity
 
-from . import DATA_UPDATED, DOMAIN as FASTDOTCOM_DOMAIN
+from __future__ import annotations
 
-ICON = "mdi:speedometer"
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import UnitOfDataRate
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from .const import DOMAIN
+from .coordinator import FastdotcomDataUpdateCoordinator
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Set up the Fast.com sensor."""
-    async_add_entities([SpeedtestSensor(hass.data[FASTDOTCOM_DOMAIN])])
+    coordinator: FastdotcomDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    async_add_entities([SpeedtestSensor(entry.entry_id, coordinator)])
 
 
-class SpeedtestSensor(RestoreEntity, SensorEntity):
-    """Implementation of a FAst.com sensor."""
+class SpeedtestSensor(CoordinatorEntity[FastdotcomDataUpdateCoordinator], SensorEntity):
+    """Implementation of a Fast.com sensor."""
 
-    def __init__(self, speedtest_data):
+    _attr_translation_key = "download"
+    _attr_device_class = SensorDeviceClass.DATA_RATE
+    _attr_native_unit_of_measurement = UnitOfDataRate.MEGABITS_PER_SECOND
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+
+    def __init__(
+        self, entry_id: str, coordinator: FastdotcomDataUpdateCoordinator
+    ) -> None:
         """Initialize the sensor."""
-        self._name = "Fast.com Download"
-        self.speedtest_client = speedtest_data
-        self._state = None
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def state(self):
-        """Return the state of the device."""
-        return self._state
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of this entity, if any."""
-        return DATA_RATE_MEGABITS_PER_SECOND
-
-    @property
-    def icon(self):
-        """Return icon."""
-        return ICON
-
-    @property
-    def should_poll(self):
-        """Return the polling requirement for this sensor."""
-        return False
-
-    async def async_added_to_hass(self):
-        """Handle entity which will be added."""
-        await super().async_added_to_hass()
-
-        self.async_on_remove(
-            async_dispatcher_connect(
-                self.hass, DATA_UPDATED, self._schedule_immediate_update
-            )
+        super().__init__(coordinator)
+        self._attr_unique_id = entry_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry_id)},
+            entry_type=DeviceEntryType.SERVICE,
+            configuration_url="https://www.fast.com",
         )
 
-        state = await self.async_get_last_state()
-        if not state:
-            return
-        self._state = state.state
-
-    def update(self):
-        """Get the latest data and update the states."""
-        data = self.speedtest_client.data
-        if data is None:
-            return
-        self._state = data["download"]
-
-    @callback
-    def _schedule_immediate_update(self):
-        self.async_schedule_update_ha_state(True)
+    @property
+    def native_value(
+        self,
+    ) -> float:
+        """Return the state of the sensor."""
+        return self.coordinator.data

@@ -1,4 +1,7 @@
 """Config flow for foscam integration."""
+
+from typing import Any
+
 from libpyfoscam import FoscamCamera
 from libpyfoscam.foscam import (
     ERROR_FOSCAM_AUTH,
@@ -7,7 +10,7 @@ from libpyfoscam.foscam import (
 )
 import voluptuous as vol
 
-from homeassistant import config_entries, exceptions
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import (
     CONF_HOST,
     CONF_NAME,
@@ -16,6 +19,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 from homeassistant.data_entry_flow import AbortFlow
+from homeassistant.exceptions import HomeAssistantError
 
 from .const import CONF_RTSP_PORT, CONF_STREAM, DOMAIN, LOGGER
 
@@ -37,7 +41,7 @@ DATA_SCHEMA = vol.Schema(
 )
 
 
-class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class FoscamConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for foscam."""
 
     VERSION = 2
@@ -47,13 +51,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         Data has the keys from DATA_SCHEMA with values provided by the user.
         """
-
-        for entry in self.hass.config_entries.async_entries(DOMAIN):
-            if (
-                entry.data[CONF_HOST] == data[CONF_HOST]
-                and entry.data[CONF_PORT] == data[CONF_PORT]
-            ):
-                raise AbortFlow("already_configured")
+        self._async_abort_entries_match(
+            {CONF_HOST: data[CONF_HOST], CONF_PORT: data[CONF_PORT]}
+        )
 
         camera = FoscamCamera(
             data[CONF_HOST],
@@ -92,7 +92,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_create_entry(title=name, data=data)
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Handle the initial step."""
         errors = {}
 
@@ -112,7 +114,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except AbortFlow:
                 raise
 
-            except Exception:  # pylint: disable=broad-except
+            except Exception:  # noqa: BLE001
                 LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
 
@@ -120,42 +122,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user", data_schema=DATA_SCHEMA, errors=errors
         )
 
-    async def async_step_import(self, import_config):
-        """Handle config import from yaml."""
-        try:
-            return await self._validate_and_create(import_config)
 
-        except CannotConnect:
-            LOGGER.error("Error importing foscam platform config: cannot connect")
-            return self.async_abort(reason="cannot_connect")
-
-        except InvalidAuth:
-            LOGGER.error("Error importing foscam platform config: invalid auth")
-            return self.async_abort(reason="invalid_auth")
-
-        except InvalidResponse:
-            LOGGER.exception(
-                "Error importing foscam platform config: invalid response from camera"
-            )
-            return self.async_abort(reason="invalid_response")
-
-        except AbortFlow:
-            raise
-
-        except Exception:  # pylint: disable=broad-except
-            LOGGER.exception(
-                "Error importing foscam platform config: unexpected exception"
-            )
-            return self.async_abort(reason="unknown")
-
-
-class CannotConnect(exceptions.HomeAssistantError):
+class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
 
 
-class InvalidAuth(exceptions.HomeAssistantError):
+class InvalidAuth(HomeAssistantError):
     """Error to indicate there is invalid auth."""
 
 
-class InvalidResponse(exceptions.HomeAssistantError):
+class InvalidResponse(HomeAssistantError):
     """Error to indicate there is invalid response."""

@@ -1,4 +1,5 @@
 """API for Smappee bound to Home Assistant OAuth."""
+
 from asyncio import run_coroutine_threadsafe
 
 from pysmappee import api
@@ -18,7 +19,7 @@ class ConfigEntrySmappeeApi(api.SmappeeApi):
         hass: core.HomeAssistant,
         config_entry: config_entries.ConfigEntry,
         implementation: config_entry_oauth2_flow.AbstractOAuth2Implementation,
-    ):
+    ) -> None:
         """Initialize Smappee Auth."""
         self.hass = hass
         self.config_entry = config_entry

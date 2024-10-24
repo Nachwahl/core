@@ -1,13 +1,11 @@
 # Describes the format for available HomeKit services
 
-start:
-  description: Starts the HomeKit driver
-
 reload:
-  description: Reload homekit and re-process YAML configuration
-
 reset_accessory:
-  description: Reset a HomeKit accessory
   target:
     entity: {}
 
+unpair:
+  target:
+    device:
+      integration: homekit

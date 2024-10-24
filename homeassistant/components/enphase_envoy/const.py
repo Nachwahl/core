@@ -1,30 +1,23 @@
 """The enphase_envoy component."""
 
+from pyenphase import EnvoyAuthenticationError, EnvoyAuthenticationRequired
 
-from homeassistant.const import ENERGY_WATT_HOUR, POWER_WATT
+from homeassistant.const import Platform
 
 DOMAIN = "enphase_envoy"
 
-PLATFORMS = ["sensor"]
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
+INVALID_AUTH_ERRORS = (EnvoyAuthenticationError, EnvoyAuthenticationRequired)
 
-COORDINATOR = "coordinator"
-NAME = "name"
+OPTION_DIAGNOSTICS_INCLUDE_FIXTURES = "diagnostics_include_fixtures"
+OPTION_DIAGNOSTICS_INCLUDE_FIXTURES_DEFAULT_VALUE = False
 
-SENSORS = {
-    "production": ("Current Energy Production", POWER_WATT),
-    "daily_production": ("Today's Energy Production", ENERGY_WATT_HOUR),
-    "seven_days_production": (
-        "Last Seven Days Energy Production",
-        ENERGY_WATT_HOUR,
-    ),
-    "lifetime_production": ("Lifetime Energy Production", ENERGY_WATT_HOUR),
-    "consumption": ("Current Energy Consumption", POWER_WATT),
-    "daily_consumption": ("Today's Energy Consumption", ENERGY_WATT_HOUR),
-    "seven_days_consumption": (
-        "Last Seven Days Energy Consumption",
-        ENERGY_WATT_HOUR,
-    ),
-    "lifetime_consumption": ("Lifetime Energy Consumption", ENERGY_WATT_HOUR),
-    "inverters": ("Inverter", POWER_WATT),
-}
+OPTION_DISABLE_KEEP_ALIVE = "disable_keep_alive"
+OPTION_DISABLE_KEEP_ALIVE_DEFAULT_VALUE = False

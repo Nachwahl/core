@@ -1,220 +1,472 @@
-"""Support for the Netatmo Weather Service."""
-import logging
+"""Support for the Netatmo sensors."""
 
-from homeassistant.components.sensor import SensorEntity
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+import logging
+from typing import Any, cast
+
+import pyatmo
+from pyatmo.modules import PublicWeatherArea
+
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     ATTR_LATITUDE,
     ATTR_LONGITUDE,
     CONCENTRATION_PARTS_PER_MILLION,
     DEGREE,
-    DEVICE_CLASS_BATTERY,
-    DEVICE_CLASS_CO2,
-    DEVICE_CLASS_HUMIDITY,
-    DEVICE_CLASS_PRESSURE,
-    DEVICE_CLASS_SIGNAL_STRENGTH,
-    DEVICE_CLASS_TEMPERATURE,
-    LENGTH_MILLIMETERS,
     PERCENTAGE,
-    PRESSURE_MBAR,
-    SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-    SPEED_KILOMETERS_PER_HOUR,
-    TEMP_CELSIUS,
+    EntityCategory,
+    UnitOfPower,
+    UnitOfPrecipitationDepth,
+    UnitOfPressure,
+    UnitOfSoundPressure,
+    UnitOfSpeed,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import PlatformNotReady
-from homeassistant.helpers.device_registry import async_entries_for_config_entry
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import (
     async_dispatcher_connect,
     async_dispatcher_send,
 )
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.typing import StateType
 
-from .const import CONF_WEATHER_AREAS, DATA_HANDLER, DOMAIN, MANUFACTURER, SIGNAL_NAME
-from .data_handler import (
-    HOMECOACH_DATA_CLASS_NAME,
-    PUBLICDATA_DATA_CLASS_NAME,
-    WEATHERSTATION_DATA_CLASS_NAME,
+from .const import (
+    CONF_URL_ENERGY,
+    CONF_URL_PUBLIC_WEATHER,
+    CONF_WEATHER_AREAS,
+    DATA_HANDLER,
+    DOMAIN,
+    NETATMO_CREATE_BATTERY,
+    NETATMO_CREATE_ROOM_SENSOR,
+    NETATMO_CREATE_SENSOR,
+    NETATMO_CREATE_WEATHER_SENSOR,
+    SIGNAL_NAME,
+)
+from .data_handler import HOME, PUBLIC, NetatmoDataHandler, NetatmoDevice, NetatmoRoom
+from .entity import (
+    NetatmoBaseEntity,
+    NetatmoModuleEntity,
+    NetatmoRoomEntity,
+    NetatmoWeatherModuleEntity,
 )
 from .helper import NetatmoArea
-from .netatmo_entity_base import NetatmoBase
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORTED_PUBLIC_SENSOR_TYPES = [
-    "temperature",
-    "pressure",
-    "humidity",
-    "rain",
-    "windstrength",
-    "guststrength",
-    "sum_rain_1",
-    "sum_rain_24",
+DIRECTION_OPTIONS = [
+    "n",
+    "ne",
+    "e",
+    "se",
+    "s",
+    "sw",
+    "w",
+    "nw",
 ]
 
-SENSOR_TYPES = {
-    "temperature": ["Temperature", TEMP_CELSIUS, None, DEVICE_CLASS_TEMPERATURE, True],
-    "temp_trend": ["Temperature trend", None, "mdi:trending-up", None, False],
-    "co2": ["CO2", CONCENTRATION_PARTS_PER_MILLION, None, DEVICE_CLASS_CO2, True],
-    "pressure": ["Pressure", PRESSURE_MBAR, None, DEVICE_CLASS_PRESSURE, True],
-    "pressure_trend": ["Pressure trend", None, "mdi:trending-up", None, False],
-    "noise": ["Noise", "dB", "mdi:volume-high", None, True],
-    "humidity": ["Humidity", PERCENTAGE, None, DEVICE_CLASS_HUMIDITY, True],
-    "rain": ["Rain", LENGTH_MILLIMETERS, "mdi:weather-rainy", None, True],
-    "sum_rain_1": [
-        "Rain last hour",
-        LENGTH_MILLIMETERS,
-        "mdi:weather-rainy",
-        None,
-        False,
-    ],
-    "sum_rain_24": ["Rain today", LENGTH_MILLIMETERS, "mdi:weather-rainy", None, True],
-    "battery_percent": [
-        "Battery Percent",
-        PERCENTAGE,
-        None,
-        DEVICE_CLASS_BATTERY,
-        True,
-    ],
-    "windangle": ["Direction", None, "mdi:compass-outline", None, True],
-    "windangle_value": ["Angle", DEGREE, "mdi:compass-outline", None, False],
-    "windstrength": [
-        "Wind Strength",
-        SPEED_KILOMETERS_PER_HOUR,
-        "mdi:weather-windy",
-        None,
-        True,
-    ],
-    "gustangle": ["Gust Direction", None, "mdi:compass-outline", None, False],
-    "gustangle_value": ["Gust Angle", DEGREE, "mdi:compass-outline", None, False],
-    "guststrength": [
-        "Gust Strength",
-        SPEED_KILOMETERS_PER_HOUR,
-        "mdi:weather-windy",
-        None,
-        False,
-    ],
-    "reachable": ["Reachability", None, "mdi:signal", None, False],
-    "rf_status": ["Radio", None, "mdi:signal", None, False],
-    "rf_status_lvl": [
-        "Radio Level",
-        SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-        None,
-        DEVICE_CLASS_SIGNAL_STRENGTH,
-        False,
-    ],
-    "wifi_status": ["Wifi", None, "mdi:wifi", None, False],
-    "wifi_status_lvl": [
-        "Wifi Level",
-        SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
-        None,
-        DEVICE_CLASS_SIGNAL_STRENGTH,
-        False,
-    ],
-    "health_idx": ["Health", None, "mdi:cloud", None, True],
-}
 
-MODULE_TYPE_OUTDOOR = "NAModule1"
-MODULE_TYPE_WIND = "NAModule2"
-MODULE_TYPE_RAIN = "NAModule3"
-MODULE_TYPE_INDOOR = "NAModule4"
-
-BATTERY_VALUES = {
-    MODULE_TYPE_WIND: {"Full": 5590, "High": 5180, "Medium": 4770, "Low": 4360},
-    MODULE_TYPE_RAIN: {"Full": 5500, "High": 5000, "Medium": 4500, "Low": 4000},
-    MODULE_TYPE_INDOOR: {"Full": 5500, "High": 5280, "Medium": 4920, "Low": 4560},
-    MODULE_TYPE_OUTDOOR: {"Full": 5500, "High": 5000, "Medium": 4500, "Low": 4000},
-}
-
-PUBLIC = "public"
+def process_health(health: StateType) -> str | None:
+    """Process health index and return string for display."""
+    if not isinstance(health, int):
+        return None
+    return {
+        0: "healthy",
+        1: "fine",
+        2: "fair",
+        3: "poor",
+    }.get(health, "unhealthy")
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    """Set up the Netatmo weather and homecoach platform."""
+def process_rf(strength: StateType) -> str | None:
+    """Process wifi signal strength and return string for display."""
+    if not isinstance(strength, int):
+        return None
+    if strength >= 90:
+        return "Low"
+    if strength >= 76:
+        return "Medium"
+    if strength >= 60:
+        return "High"
+    return "Full"
+
+
+def process_wifi(strength: StateType) -> str | None:
+    """Process wifi signal strength and return string for display."""
+    if not isinstance(strength, int):
+        return None
+    if strength >= 86:
+        return "Low"
+    if strength >= 71:
+        return "Medium"
+    if strength >= 56:
+        return "High"
+    return "Full"
+
+
+@dataclass(frozen=True, kw_only=True)
+class NetatmoSensorEntityDescription(SensorEntityDescription):
+    """Describes Netatmo sensor entity."""
+
+    netatmo_name: str
+    value_fn: Callable[[StateType], StateType] = lambda x: x
+
+
+SENSOR_TYPES: tuple[NetatmoSensorEntityDescription, ...] = (
+    NetatmoSensorEntityDescription(
+        key="temperature",
+        netatmo_name="temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        suggested_display_precision=1,
+    ),
+    NetatmoSensorEntityDescription(
+        key="temp_trend",
+        netatmo_name="temp_trend",
+        entity_registry_enabled_default=False,
+    ),
+    NetatmoSensorEntityDescription(
+        key="co2",
+        netatmo_name="co2",
+        native_unit_of_measurement=CONCENTRATION_PARTS_PER_MILLION,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.CO2,
+    ),
+    NetatmoSensorEntityDescription(
+        key="pressure",
+        netatmo_name="pressure",
+        native_unit_of_measurement=UnitOfPressure.MBAR,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.ATMOSPHERIC_PRESSURE,
+        suggested_display_precision=1,
+    ),
+    NetatmoSensorEntityDescription(
+        key="pressure_trend",
+        netatmo_name="pressure_trend",
+        entity_registry_enabled_default=False,
+    ),
+    NetatmoSensorEntityDescription(
+        key="noise",
+        netatmo_name="noise",
+        native_unit_of_measurement=UnitOfSoundPressure.DECIBEL,
+        device_class=SensorDeviceClass.SOUND_PRESSURE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    NetatmoSensorEntityDescription(
+        key="humidity",
+        netatmo_name="humidity",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.HUMIDITY,
+    ),
+    NetatmoSensorEntityDescription(
+        key="rain",
+        netatmo_name="rain",
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    NetatmoSensorEntityDescription(
+        key="sum_rain_1",
+        netatmo_name="sum_rain_1",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=1,
+    ),
+    NetatmoSensorEntityDescription(
+        key="sum_rain_24",
+        netatmo_name="sum_rain_24",
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+    ),
+    NetatmoSensorEntityDescription(
+        key="battery_percent",
+        netatmo_name="battery",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.BATTERY,
+    ),
+    NetatmoSensorEntityDescription(
+        key="windangle",
+        netatmo_name="wind_direction",
+        device_class=SensorDeviceClass.ENUM,
+        options=DIRECTION_OPTIONS,
+        value_fn=lambda x: x.lower() if isinstance(x, str) else None,
+    ),
+    NetatmoSensorEntityDescription(
+        key="windangle_value",
+        netatmo_name="wind_angle",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    NetatmoSensorEntityDescription(
+        key="windstrength",
+        netatmo_name="wind_strength",
+        native_unit_of_measurement=UnitOfSpeed.KILOMETERS_PER_HOUR,
+        device_class=SensorDeviceClass.WIND_SPEED,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    NetatmoSensorEntityDescription(
+        key="gustangle",
+        netatmo_name="gust_direction",
+        entity_registry_enabled_default=False,
+        device_class=SensorDeviceClass.ENUM,
+        options=DIRECTION_OPTIONS,
+        value_fn=lambda x: x.lower() if isinstance(x, str) else None,
+    ),
+    NetatmoSensorEntityDescription(
+        key="gustangle_value",
+        netatmo_name="gust_angle",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    NetatmoSensorEntityDescription(
+        key="guststrength",
+        netatmo_name="gust_strength",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=UnitOfSpeed.KILOMETERS_PER_HOUR,
+        device_class=SensorDeviceClass.WIND_SPEED,
+        state_class=SensorStateClass.MEASUREMENT,
+    ),
+    NetatmoSensorEntityDescription(
+        key="reachable",
+        netatmo_name="reachable",
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+    ),
+    NetatmoSensorEntityDescription(
+        key="rf_status",
+        netatmo_name="rf_strength",
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=process_rf,
+    ),
+    NetatmoSensorEntityDescription(
+        key="wifi_status",
+        netatmo_name="wifi_strength",
+        entity_registry_enabled_default=False,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=process_wifi,
+    ),
+    NetatmoSensorEntityDescription(
+        key="health_idx",
+        netatmo_name="health_idx",
+        device_class=SensorDeviceClass.ENUM,
+        options=["healthy", "fine", "fair", "poor", "unhealthy"],
+        value_fn=process_health,
+    ),
+    NetatmoSensorEntityDescription(
+        key="power",
+        netatmo_name="power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.POWER,
+    ),
+)
+SENSOR_TYPES_KEYS = [desc.key for desc in SENSOR_TYPES]
+
+
+@dataclass(frozen=True, kw_only=True)
+class NetatmoPublicWeatherSensorEntityDescription(SensorEntityDescription):
+    """Describes Netatmo sensor entity."""
+
+    value_fn: Callable[[PublicWeatherArea], dict[str, Any]]
+
+
+PUBLIC_WEATHER_STATION_TYPES: tuple[
+    NetatmoPublicWeatherSensorEntityDescription, ...
+] = (
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        suggested_display_precision=1,
+        value_fn=lambda area: area.get_latest_temperatures(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="pressure",
+        native_unit_of_measurement=UnitOfPressure.MBAR,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.ATMOSPHERIC_PRESSURE,
+        suggested_display_precision=1,
+        value_fn=lambda area: area.get_latest_pressures(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="humidity",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        device_class=SensorDeviceClass.HUMIDITY,
+        value_fn=lambda area: area.get_latest_humidities(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="rain",
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda area: area.get_latest_rain(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="sum_rain_1",
+        translation_key="sum_rain_1",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=1,
+        value_fn=lambda area: area.get_60_min_rain(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="sum_rain_24",
+        translation_key="sum_rain_24",
+        native_unit_of_measurement=UnitOfPrecipitationDepth.MILLIMETERS,
+        device_class=SensorDeviceClass.PRECIPITATION,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda area: area.get_24_h_rain(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="windangle_value",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda area: area.get_latest_wind_angles(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="windstrength",
+        native_unit_of_measurement=UnitOfSpeed.KILOMETERS_PER_HOUR,
+        device_class=SensorDeviceClass.WIND_SPEED,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda area: area.get_latest_wind_strengths(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="gustangle_value",
+        translation_key="gust_angle",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=DEGREE,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda area: area.get_latest_gust_angles(),
+    ),
+    NetatmoPublicWeatherSensorEntityDescription(
+        key="guststrength",
+        translation_key="gust_strength",
+        entity_registry_enabled_default=False,
+        native_unit_of_measurement=UnitOfSpeed.KILOMETERS_PER_HOUR,
+        device_class=SensorDeviceClass.WIND_SPEED,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda area: area.get_latest_gust_strengths(),
+    ),
+)
+
+BATTERY_SENSOR_DESCRIPTION = NetatmoSensorEntityDescription(
+    key="battery",
+    netatmo_name="battery",
+    entity_category=EntityCategory.DIAGNOSTIC,
+    native_unit_of_measurement=PERCENTAGE,
+    state_class=SensorStateClass.MEASUREMENT,
+    device_class=SensorDeviceClass.BATTERY,
+)
+
+
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    """Set up the Netatmo sensor platform."""
+
+    @callback
+    def _create_battery_entity(netatmo_device: NetatmoDevice) -> None:
+        if not hasattr(netatmo_device.device, "battery"):
+            return
+        entity = NetatmoClimateBatterySensor(netatmo_device)
+        async_add_entities([entity])
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, NETATMO_CREATE_BATTERY, _create_battery_entity)
+    )
+
+    @callback
+    def _create_weather_sensor_entity(netatmo_device: NetatmoDevice) -> None:
+        async_add_entities(
+            NetatmoWeatherSensor(netatmo_device, description)
+            for description in SENSOR_TYPES
+            if description.netatmo_name in netatmo_device.device.features
+        )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, NETATMO_CREATE_WEATHER_SENSOR, _create_weather_sensor_entity
+        )
+    )
+
+    @callback
+    def _create_sensor_entity(netatmo_device: NetatmoDevice) -> None:
+        _LOGGER.debug(
+            "Adding %s sensor %s",
+            netatmo_device.device.device_category,
+            netatmo_device.device.name,
+        )
+        async_add_entities(
+            NetatmoSensor(netatmo_device, description)
+            for description in SENSOR_TYPES
+            if description.key in netatmo_device.device.features
+        )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(hass, NETATMO_CREATE_SENSOR, _create_sensor_entity)
+    )
+
+    @callback
+    def _create_room_sensor_entity(netatmo_device: NetatmoRoom) -> None:
+        if not netatmo_device.room.climate_type:
+            msg = f"No climate type found for this room: {netatmo_device.room.name}"
+            _LOGGER.debug(msg)
+            return
+        async_add_entities(
+            NetatmoRoomSensor(netatmo_device, description)
+            for description in SENSOR_TYPES
+            if description.key in netatmo_device.room.features
+        )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass, NETATMO_CREATE_ROOM_SENSOR, _create_room_sensor_entity
+        )
+    )
+
+    device_registry = dr.async_get(hass)
     data_handler = hass.data[DOMAIN][entry.entry_id][DATA_HANDLER]
 
-    await data_handler.register_data_class(
-        WEATHERSTATION_DATA_CLASS_NAME, WEATHERSTATION_DATA_CLASS_NAME, None
-    )
-    await data_handler.register_data_class(
-        HOMECOACH_DATA_CLASS_NAME, HOMECOACH_DATA_CLASS_NAME, None
-    )
-
-    async def find_entities(data_class_name):
-        """Find all entities."""
-        if data_class_name not in data_handler.data:
-            raise PlatformNotReady
-
-        all_module_infos = {}
-        data = data_handler.data
-
-        if data_class_name not in data:
-            return []
-
-        if data[data_class_name] is None:
-            return []
-
-        data_class = data[data_class_name]
-
-        for station_id in data_class.stations:
-            for module_id in data_class.get_modules(station_id):
-                all_module_infos[module_id] = data_class.get_module(module_id)
-
-            all_module_infos[station_id] = data_class.get_station(station_id)
-
-        entities = []
-        for module in all_module_infos.values():
-            if "_id" not in module:
-                _LOGGER.debug("Skipping module %s", module.get("module_name"))
-                continue
-
-            _LOGGER.debug(
-                "Adding module %s %s",
-                module.get("module_name"),
-                module.get("_id"),
-            )
-            conditions = [
-                c.lower()
-                for c in data_class.get_monitored_conditions(module_id=module["_id"])
-                if c.lower() in SENSOR_TYPES
-            ]
-            for condition in conditions:
-                if f"{condition}_value" in SENSOR_TYPES:
-                    conditions.append(f"{condition}_value")
-                elif f"{condition}_lvl" in SENSOR_TYPES:
-                    conditions.append(f"{condition}_lvl")
-
-            for condition in conditions:
-                entities.append(
-                    NetatmoSensor(data_handler, data_class_name, module, condition)
-                )
-
-        await data_handler.unregister_data_class(data_class_name, None)
-
-        return entities
-
-    for data_class_name in [
-        WEATHERSTATION_DATA_CLASS_NAME,
-        HOMECOACH_DATA_CLASS_NAME,
-    ]:
-        async_add_entities(await find_entities(data_class_name), True)
-
-    device_registry = await hass.helpers.device_registry.async_get_registry()
-
-    async def add_public_entities(update=True):
+    async def add_public_entities(update: bool = True) -> None:
         """Retrieve Netatmo public weather entities."""
         entities = {
             device.name: device.id
-            for device in async_entries_for_config_entry(
+            for device in dr.async_entries_for_config_entry(
                 device_registry, entry.entry_id
             )
-            if device.model == "Public Weather stations"
+            if device.model == "Public Weather station"
         }
 
-        new_entities = []
+        new_entities: list[NetatmoPublicSensor] = []
         for area in [
             NetatmoArea(**i) for i in entry.options.get(CONF_WEATHER_AREAS, {}).values()
         ]:
-            signal_name = f"{PUBLICDATA_DATA_CLASS_NAME}-{area.uuid}"
+            signal_name = f"{PUBLIC}-{area.uuid}"
 
             if area.area_name in entities:
                 entities.pop(area.area_name)
@@ -227,281 +479,217 @@ async def async_setup_entry(hass, entry, async_add_entities):
                     )
                     continue
 
-            await data_handler.register_data_class(
-                PUBLICDATA_DATA_CLASS_NAME,
+            await data_handler.subscribe(
+                PUBLIC,
                 signal_name,
                 None,
                 lat_ne=area.lat_ne,
                 lon_ne=area.lon_ne,
                 lat_sw=area.lat_sw,
                 lon_sw=area.lon_sw,
+                area_id=str(area.uuid),
             )
-            for sensor_type in SUPPORTED_PUBLIC_SENSOR_TYPES:
-                new_entities.append(
-                    NetatmoPublicSensor(data_handler, area, sensor_type)
-                )
+
+            new_entities.extend(
+                NetatmoPublicSensor(data_handler, area, description)
+                for description in PUBLIC_WEATHER_STATION_TYPES
+            )
 
         for device_id in entities.values():
             device_registry.async_remove_device(device_id)
 
-        if new_entities:
-            async_add_entities(new_entities)
+        async_add_entities(new_entities)
 
     async_dispatcher_connect(
         hass, f"signal-{DOMAIN}-public-update-{entry.entry_id}", add_public_entities
     )
 
-    entry.add_update_listener(async_config_entry_updated)
-
     await add_public_entities(False)
 
 
-async def async_config_entry_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Handle signals of config entry being updated."""
-    async_dispatcher_send(hass, f"signal-{DOMAIN}-public-update-{entry.entry_id}")
+class NetatmoWeatherSensor(NetatmoWeatherModuleEntity, SensorEntity):
+    """Implementation of a Netatmo weather/home coach sensor."""
 
+    entity_description: NetatmoSensorEntityDescription
 
-class NetatmoSensor(NetatmoBase, SensorEntity):
-    """Implementation of a Netatmo sensor."""
-
-    def __init__(self, data_handler, data_class_name, module_info, sensor_type):
+    def __init__(
+        self,
+        netatmo_device: NetatmoDevice,
+        description: NetatmoSensorEntityDescription,
+    ) -> None:
         """Initialize the sensor."""
-        super().__init__(data_handler)
+        super().__init__(netatmo_device)
+        self.entity_description = description
+        self._attr_translation_key = description.netatmo_name
+        self._attr_unique_id = f"{self.device.entity_id}-{description.key}"
 
-        self._data_classes.append(
-            {"name": data_class_name, SIGNAL_NAME: data_class_name}
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        return (
+            self.device.reachable
+            or getattr(self.device, self.entity_description.netatmo_name) is not None
         )
-
-        self._id = module_info["_id"]
-        self._station_id = module_info.get("main_device", self._id)
-
-        station = self._data.get_station(self._station_id)
-        device = self._data.get_module(self._id)
-
-        if not device:
-            # Assume it's a station if module can't be found
-            device = station
-
-        if device["type"] in ("NHC", "NAMain"):
-            self._device_name = module_info["station_name"]
-        else:
-            self._device_name = (
-                f"{station['station_name']} "
-                f"{module_info.get('module_name', device['type'])}"
-            )
-
-        self._name = (
-            f"{MANUFACTURER} {self._device_name} {SENSOR_TYPES[sensor_type][0]}"
-        )
-        self.type = sensor_type
-        self._state = None
-        self._device_class = SENSOR_TYPES[self.type][3]
-        self._icon = SENSOR_TYPES[self.type][2]
-        self._unit_of_measurement = SENSOR_TYPES[self.type][1]
-        self._model = device["type"]
-        self._unique_id = f"{self._id}-{self.type}"
-        self._enabled_default = SENSOR_TYPES[self.type][4]
-
-    @property
-    def icon(self):
-        """Icon to use in the frontend, if any."""
-        return self._icon
-
-    @property
-    def device_class(self):
-        """Return the device class of the sensor."""
-        return self._device_class
-
-    @property
-    def state(self):
-        """Return the state of the device."""
-        return self._state
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of this entity, if any."""
-        return self._unit_of_measurement
-
-    @property
-    def available(self):
-        """Return entity availability."""
-        return self._state is not None
-
-    @property
-    def entity_registry_enabled_default(self) -> bool:
-        """Return if the entity should be enabled when first added to the entity registry."""
-        return self._enabled_default
 
     @callback
-    def async_update_callback(self):  # noqa: C901
+    def async_update_callback(self) -> None:
         """Update the entity's state."""
-        if self._data is None:
-            if self._state is None:
-                return
-            _LOGGER.warning("No data from update")
-            self._state = None
-            return
+        value = cast(
+            StateType, getattr(self.device, self.entity_description.netatmo_name)
+        )
+        if value is not None:
+            value = self.entity_description.value_fn(value)
+        self._attr_native_value = value
+        self.async_write_ha_state()
 
-        data = self._data.get_last_data(station_id=self._station_id, exclude=3600).get(
-            self._id
+
+class NetatmoClimateBatterySensor(NetatmoModuleEntity, SensorEntity):
+    """Implementation of a Netatmo sensor."""
+
+    entity_description: NetatmoSensorEntityDescription
+    device: pyatmo.modules.NRV
+    _attr_configuration_url = CONF_URL_ENERGY
+
+    def __init__(self, netatmo_device: NetatmoDevice) -> None:
+        """Initialize the sensor."""
+        super().__init__(netatmo_device)
+        self.entity_description = BATTERY_SENSOR_DESCRIPTION
+
+        self._publishers.extend(
+            [
+                {
+                    "name": HOME,
+                    "home_id": netatmo_device.device.home.entity_id,
+                    SIGNAL_NAME: netatmo_device.signal_name,
+                },
+            ]
         )
 
-        if data is None:
-            if self._state:
-                _LOGGER.debug(
-                    "No data found for %s - %s (%s)",
-                    self.name,
-                    self._device_name,
-                    self._id,
-                )
-            self._state = None
+        self._attr_unique_id = f"{netatmo_device.parent_id}-{self.device.entity_id}-{self.entity_description.key}"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, netatmo_device.parent_id)},
+            name=netatmo_device.device.name,
+            manufacturer=self.device_description[0],
+            model=self.device_description[1],
+            configuration_url=self._attr_configuration_url,
+        )
+
+    @callback
+    def async_update_callback(self) -> None:
+        """Update the entity's state."""
+        if not self.device.reachable:
+            if self.available:
+                self._attr_available = False
             return
 
-        try:
-            if self.type == "temperature":
-                self._state = round(data["Temperature"], 1)
-            elif self.type == "temp_trend":
-                self._state = data["temp_trend"]
-            elif self.type == "humidity":
-                self._state = data["Humidity"]
-            elif self.type == "rain":
-                self._state = data["Rain"]
-            elif self.type == "sum_rain_1":
-                self._state = round(data["sum_rain_1"], 1)
-            elif self.type == "sum_rain_24":
-                self._state = data["sum_rain_24"]
-            elif self.type == "noise":
-                self._state = data["Noise"]
-            elif self.type == "co2":
-                self._state = data["CO2"]
-            elif self.type == "pressure":
-                self._state = round(data["Pressure"], 1)
-            elif self.type == "pressure_trend":
-                self._state = data["pressure_trend"]
-            elif self.type == "battery_percent":
-                self._state = data["battery_percent"]
-            elif self.type == "windangle_value":
-                self._state = fix_angle(data["WindAngle"])
-            elif self.type == "windangle":
-                self._state = process_angle(fix_angle(data["WindAngle"]))
-            elif self.type == "windstrength":
-                self._state = data["WindStrength"]
-            elif self.type == "gustangle_value":
-                self._state = fix_angle(data["GustAngle"])
-            elif self.type == "gustangle":
-                self._state = process_angle(fix_angle(data["GustAngle"]))
-            elif self.type == "guststrength":
-                self._state = data["GustStrength"]
-            elif self.type == "reachable":
-                self._state = data["reachable"]
-            elif self.type == "rf_status_lvl":
-                self._state = data["rf_status"]
-            elif self.type == "rf_status":
-                self._state = process_rf(data["rf_status"])
-            elif self.type == "wifi_status_lvl":
-                self._state = data["wifi_status"]
-            elif self.type == "wifi_status":
-                self._state = process_wifi(data["wifi_status"])
-            elif self.type == "health_idx":
-                self._state = process_health(data["health_idx"])
-        except KeyError:
-            if self._state:
-                _LOGGER.debug("No %s data found for %s", self.type, self._device_name)
-            self._state = None
+        self._attr_available = True
+        self._attr_native_value = self.device.battery
+
+
+class NetatmoSensor(NetatmoModuleEntity, SensorEntity):
+    """Implementation of a Netatmo sensor."""
+
+    entity_description: NetatmoSensorEntityDescription
+    _attr_configuration_url = CONF_URL_ENERGY
+
+    def __init__(
+        self,
+        netatmo_device: NetatmoDevice,
+        description: NetatmoSensorEntityDescription,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(netatmo_device)
+        self.entity_description = description
+
+        self._publishers.extend(
+            [
+                {
+                    "name": HOME,
+                    "home_id": self.home.entity_id,
+                    SIGNAL_NAME: netatmo_device.signal_name,
+                },
+            ]
+        )
+
+        self._attr_unique_id = (
+            f"{self.device.entity_id}-{self.device.entity_id}-{description.key}"
+        )
+
+    @callback
+    def async_update_callback(self) -> None:
+        """Update the entity's state."""
+        if not self.device.reachable:
+            if self.available:
+                self._attr_available = False
             return
 
+        if (state := getattr(self.device, self.entity_description.key)) is None:
+            return
 
-def fix_angle(angle: int) -> int:
-    """Fix angle when value is negative."""
-    if angle < 0:
-        return 360 + angle
-    return angle
+        self._attr_available = True
+        self._attr_native_value = state
 
-
-def process_angle(angle: int) -> str:
-    """Process angle and return string for display."""
-    if angle >= 330:
-        return "N"
-    if angle >= 300:
-        return "NW"
-    if angle >= 240:
-        return "W"
-    if angle >= 210:
-        return "SW"
-    if angle >= 150:
-        return "S"
-    if angle >= 120:
-        return "SE"
-    if angle >= 60:
-        return "E"
-    if angle >= 30:
-        return "NE"
-    return "N"
+        self.async_write_ha_state()
 
 
-def process_battery(data: int, model: str) -> str:
-    """Process battery data and return string for display."""
-    values = BATTERY_VALUES[model]
+class NetatmoRoomSensor(NetatmoRoomEntity, SensorEntity):
+    """Implementation of a Netatmo room sensor."""
 
-    if data >= values["Full"]:
-        return "Full"
-    if data >= values["High"]:
-        return "High"
-    if data >= values["Medium"]:
-        return "Medium"
-    if data >= values["Low"]:
-        return "Low"
-    return "Very Low"
+    entity_description: NetatmoSensorEntityDescription
 
+    def __init__(
+        self,
+        netatmo_room: NetatmoRoom,
+        description: NetatmoSensorEntityDescription,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(netatmo_room)
+        self.entity_description = description
 
-def process_health(health):
-    """Process health index and return string for display."""
-    if health == 0:
-        return "Healthy"
-    if health == 1:
-        return "Fine"
-    if health == 2:
-        return "Fair"
-    if health == 3:
-        return "Poor"
-    if health == 4:
-        return "Unhealthy"
+        self._publishers.extend(
+            [
+                {
+                    "name": HOME,
+                    "home_id": self.home.entity_id,
+                    SIGNAL_NAME: netatmo_room.signal_name,
+                },
+            ]
+        )
 
+        self._attr_unique_id = (
+            f"{self.device.entity_id}-{self.device.entity_id}-{description.key}"
+        )
 
-def process_rf(strength):
-    """Process wifi signal strength and return string for display."""
-    if strength >= 90:
-        return "Low"
-    if strength >= 76:
-        return "Medium"
-    if strength >= 60:
-        return "High"
-    return "Full"
+    @callback
+    def async_update_callback(self) -> None:
+        """Update the entity's state."""
+        if (state := getattr(self.device, self.entity_description.key)) is None:
+            return
 
+        self._attr_native_value = state
 
-def process_wifi(strength):
-    """Process wifi signal strength and return string for display."""
-    if strength >= 86:
-        return "Low"
-    if strength >= 71:
-        return "Medium"
-    if strength >= 56:
-        return "High"
-    return "Full"
+        self.async_write_ha_state()
 
 
-class NetatmoPublicSensor(NetatmoBase, SensorEntity):
+class NetatmoPublicSensor(NetatmoBaseEntity, SensorEntity):
     """Represent a single sensor in a Netatmo."""
 
-    def __init__(self, data_handler, area, sensor_type):
+    entity_description: NetatmoPublicWeatherSensorEntityDescription
+
+    def __init__(
+        self,
+        data_handler: NetatmoDataHandler,
+        area: NetatmoArea,
+        description: NetatmoPublicWeatherSensorEntityDescription,
+    ) -> None:
         """Initialize the sensor."""
         super().__init__(data_handler)
+        self.entity_description = description
 
-        self._signal_name = f"{PUBLICDATA_DATA_CLASS_NAME}-{area.uuid}"
-
-        self._data_classes.append(
+        self._signal_name = f"{PUBLIC}-{area.uuid}"
+        self._publishers.append(
             {
-                "name": PUBLICDATA_DATA_CLASS_NAME,
+                "name": PUBLIC,
                 "lat_ne": area.lat_ne,
                 "lon_ne": area.lon_ne,
                 "lat_sw": area.lat_sw,
@@ -511,99 +699,54 @@ class NetatmoPublicSensor(NetatmoBase, SensorEntity):
             }
         )
 
-        self.type = sensor_type
+        self._station = data_handler.account.public_weather_areas[str(area.uuid)]
+
         self.area = area
         self._mode = area.mode
-        self._area_name = area.area_name
-        self._id = self._area_name
-        self._device_name = f"{self._area_name}"
-        self._name = f"{MANUFACTURER} {self._device_name} {SENSOR_TYPES[self.type][0]}"
-        self._state = None
-        self._device_class = SENSOR_TYPES[self.type][3]
-        self._icon = SENSOR_TYPES[self.type][2]
-        self._unit_of_measurement = SENSOR_TYPES[self.type][1]
         self._show_on_map = area.show_on_map
-        self._unique_id = f"{self._device_name.replace(' ', '-')}-{self.type}"
-        self._model = PUBLIC
+        self._attr_unique_id = f"{area.area_name.replace(' ', '-')}-{description.key}"
 
-    @property
-    def icon(self):
-        """Icon to use in the frontend."""
-        return self._icon
-
-    @property
-    def device_class(self):
-        """Return the device class of the sensor."""
-        return self._device_class
-
-    @property
-    def extra_state_attributes(self):
-        """Return the attributes of the device."""
-        attrs = {}
-
-        if self._show_on_map:
-            attrs[ATTR_LATITUDE] = (self.area.lat_ne + self.area.lat_sw) / 2
-            attrs[ATTR_LONGITUDE] = (self.area.lon_ne + self.area.lon_sw) / 2
-
-        return attrs
-
-    @property
-    def state(self):
-        """Return the state of the device."""
-        return self._state
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement of this entity."""
-        return self._unit_of_measurement
-
-    @property
-    def available(self):
-        """Return True if entity is available."""
-        return self._state is not None
-
-    @property
-    def _data(self):
-        return self.data_handler.data[self._signal_name]
+        self._attr_extra_state_attributes.update(
+            {
+                ATTR_LATITUDE: (area.lat_ne + area.lat_sw) / 2,
+                ATTR_LONGITUDE: (area.lon_ne + area.lon_sw) / 2,
+            }
+        )
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, area.area_name)},
+            name=area.area_name,
+            model="Public Weather station",
+            manufacturer="Netatmo",
+            configuration_url=CONF_URL_PUBLIC_WEATHER,
+        )
 
     async def async_added_to_hass(self) -> None:
         """Entity created."""
         await super().async_added_to_hass()
 
-        self.data_handler.listeners.append(
+        self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                f"netatmo-config-{self.device_info['name']}",
+                f"netatmo-config-{self.area.area_name}",
                 self.async_config_update_callback,
             )
         )
 
-    async def async_config_update_callback(self, area):
+    async def async_config_update_callback(self, area: NetatmoArea) -> None:
         """Update the entity's config."""
         if self.area == area:
             return
 
-        await self.data_handler.unregister_data_class(
+        await self.data_handler.unsubscribe(
             self._signal_name, self.async_update_callback
         )
 
         self.area = area
-        self._signal_name = f"{PUBLICDATA_DATA_CLASS_NAME}-{area.uuid}"
-        self._data_classes = [
-            {
-                "name": PUBLICDATA_DATA_CLASS_NAME,
-                "lat_ne": area.lat_ne,
-                "lon_ne": area.lon_ne,
-                "lat_sw": area.lat_sw,
-                "lon_sw": area.lon_sw,
-                "area_name": area.area_name,
-                SIGNAL_NAME: self._signal_name,
-            }
-        ]
+        self._signal_name = f"{PUBLIC}-{area.uuid}"
         self._mode = area.mode
         self._show_on_map = area.show_on_map
-        await self.data_handler.register_data_class(
-            PUBLICDATA_DATA_CLASS_NAME,
+        await self.data_handler.subscribe(
+            PUBLIC,
             self._signal_name,
             self.async_update_callback,
             lat_ne=area.lat_ne,
@@ -613,45 +756,28 @@ class NetatmoPublicSensor(NetatmoBase, SensorEntity):
         )
 
     @callback
-    def async_update_callback(self):
+    def async_update_callback(self) -> None:
         """Update the entity's state."""
-        if self._data is None:
-            if self._state is None:
-                return
-            _LOGGER.warning("No data from update")
-            self._state = None
-            return
+        data = self.entity_description.value_fn(self._station)
 
-        data = None
+        if not data:
+            if self.available:
+                _LOGGER.error(
+                    "No station provides %s data in the area %s",
+                    self.entity_description.key,
+                    self.area.area_name,
+                )
 
-        if self.type == "temperature":
-            data = self._data.get_latest_temperatures()
-        elif self.type == "pressure":
-            data = self._data.get_latest_pressures()
-        elif self.type == "humidity":
-            data = self._data.get_latest_humidities()
-        elif self.type == "rain":
-            data = self._data.get_latest_rain()
-        elif self.type == "sum_rain_1":
-            data = self._data.get_60_min_rain()
-        elif self.type == "sum_rain_24":
-            data = self._data.get_24_h_rain()
-        elif self.type == "windstrength":
-            data = self._data.get_latest_wind_strengths()
-        elif self.type == "guststrength":
-            data = self._data.get_latest_gust_strengths()
-
-        if data is None:
-            if self._state is None:
-                return
-            _LOGGER.debug(
-                "No station provides %s data in the area %s", self.type, self._area_name
-            )
-            self._state = None
+            self._attr_available = False
             return
 
         if values := [x for x in data.values() if x is not None]:
             if self._mode == "avg":
-                self._state = round(sum(values) / len(values), 1)
+                self._attr_native_value = round(sum(values) / len(values), 1)
             elif self._mode == "max":
-                self._state = max(values)
+                self._attr_native_value = max(values)
+            elif self._mode == "min":
+                self._attr_native_value = min(values)
+
+        self._attr_available = self.native_value is not None
+        self.async_write_ha_state()

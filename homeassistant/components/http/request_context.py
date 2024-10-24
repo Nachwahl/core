@@ -1,18 +1,26 @@
 """Middleware to set the request context."""
 
-from aiohttp.web import middleware
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+
+from aiohttp.web import Application, Request, StreamResponse, middleware
 
 from homeassistant.core import callback
-
-# mypy: allow-untyped-defs
+from homeassistant.helpers.http import current_request  # noqa: F401
 
 
 @callback
-def setup_request_context(app, context):
+def setup_request_context(
+    app: Application, context: ContextVar[Request | None]
+) -> None:
     """Create request context middleware for the app."""
 
     @middleware
-    async def request_context_middleware(request, handler):
+    async def request_context_middleware(
+        request: Request, handler: Callable[[Request], Awaitable[StreamResponse]]
+    ) -> StreamResponse:
         """Request context middleware."""
         context.set(request)
         return await handler(request)

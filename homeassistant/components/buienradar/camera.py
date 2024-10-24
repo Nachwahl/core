@@ -1,4 +1,5 @@
 """Provide animated GIF loops of Buienradar imagery."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,23 +9,15 @@ import logging
 import aiohttp
 import voluptuous as vol
 
-from homeassistant.components.camera import PLATFORM_SCHEMA, Camera
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME
-from homeassistant.helpers import config_validation as cv
+from homeassistant.components.camera import Camera
+from homeassistant.const import CONF_COUNTRY_CODE, CONF_LATITUDE, CONF_LONGITUDE
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import HomeAssistantType
 from homeassistant.util import dt as dt_util
 
-from .const import (
-    CONF_COUNTRY,
-    CONF_DELTA,
-    CONF_DIMENSION,
-    DEFAULT_COUNTRY,
-    DEFAULT_DELTA,
-    DEFAULT_DIMENSION,
-)
+from . import BuienRadarConfigEntry
+from .const import CONF_DELTA, DEFAULT_COUNTRY, DEFAULT_DELTA, DEFAULT_DIMENSION
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,35 +27,19 @@ DIM_RANGE = vol.All(vol.Coerce(int), vol.Range(min=120, max=700))
 # Multiple choice for available Radar Map URL
 SUPPORTED_COUNTRY_CODES = ["NL", "BE"]
 
-PLATFORM_SCHEMA = vol.All(
-    PLATFORM_SCHEMA.extend(
-        {
-            vol.Optional(CONF_DIMENSION, default=512): DIM_RANGE,
-            vol.Optional(CONF_DELTA, default=600.0): cv.positive_float,
-            vol.Optional(CONF_NAME, default="Buienradar loop"): cv.string,
-            vol.Optional(CONF_COUNTRY, default="NL"): vol.All(
-                vol.Coerce(str), vol.In(SUPPORTED_COUNTRY_CODES)
-            ),
-        }
-    )
-)
-
-
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up buienradar camera platform."""
-    _LOGGER.warning(
-        "Platform configuration is deprecated, will be removed in a future release"
-    )
-
 
 async def async_setup_entry(
-    hass: HomeAssistantType, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: BuienRadarConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up buienradar radar-loop camera component."""
     config = entry.data
     options = entry.options
 
-    country = options.get(CONF_COUNTRY, config.get(CONF_COUNTRY, DEFAULT_COUNTRY))
+    country = options.get(
+        CONF_COUNTRY_CODE, config.get(CONF_COUNTRY_CODE, DEFAULT_COUNTRY)
+    )
 
     delta = options.get(CONF_DELTA, config.get(CONF_DELTA, DEFAULT_DELTA))
 
@@ -73,25 +50,24 @@ async def async_setup_entry(
 
 
 class BuienradarCam(Camera):
-    """
-    A camera component producing animated buienradar radar-imagery GIFs.
+    """A camera component producing animated buienradar radar-imagery GIFs.
 
     Rain radar imagery camera based on image URL taken from [0].
 
     [0]: https://www.buienradar.nl/overbuienradar/gratis-weerdata
     """
 
+    _attr_entity_registry_enabled_default = False
+    _attr_name = "Buienradar"
+
     def __init__(
         self, latitude: float, longitude: float, delta: float, country: str
     ) -> None:
-        """
-        Initialize the component.
+        """Initialize the component.
 
         This constructor must be run in the event loop.
         """
         super().__init__()
-
-        self._name = "Buienradar"
 
         # dimension (x and y) of returned radar image
         self._dimension = DEFAULT_DIMENSION
@@ -118,12 +94,7 @@ class BuienradarCam(Camera):
         # deadline for image refresh - self.delta after last successful load
         self._deadline: datetime | None = None
 
-        self._unique_id = f"{latitude:2.6f}{longitude:2.6f}"
-
-    @property
-    def name(self) -> str:
-        """Return the component name."""
-        return self._name
+        self._attr_unique_id = f"{latitude:2.6f}{longitude:2.6f}"
 
     def __needs_refresh(self) -> bool:
         if not (self._delta and self._deadline and self._last_image):
@@ -146,30 +117,32 @@ class BuienradarCam(Camera):
             headers = {}
 
         try:
-            async with session.get(url, timeout=5, headers=headers) as res:
+            async with session.get(
+                url, timeout=aiohttp.ClientTimeout(total=5), headers=headers
+            ) as res:
                 res.raise_for_status()
 
                 if res.status == 304:
                     _LOGGER.debug("HTTP 304 - success")
                     return True
 
-                last_modified = res.headers.get("Last-Modified")
-                if last_modified:
+                if last_modified := res.headers.get("Last-Modified"):
                     self._last_modified = last_modified
 
                 self._last_image = await res.read()
                 _LOGGER.debug("HTTP 200 - Last-Modified: %s", last_modified)
 
                 return True
-        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+        except (TimeoutError, aiohttp.ClientError) as err:
             _LOGGER.error("Failed to fetch image, %s", type(err))
             return False
 
-    async def async_camera_image(self) -> bytes | None:
-        """
-        Return a still image response from the camera.
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Return a still image response from the camera.
 
-        Uses ayncio conditions to make sure only one task enters the critical
+        Uses asyncio conditions to make sure only one task enters the critical
         section at the same time. Otherwise, two http requests would start
         when two tabs with Home Assistant are open.
 
@@ -189,7 +162,7 @@ class BuienradarCam(Camera):
 
         # get lock, check iff loading, await notification if loading
         async with self._condition:
-            # can not be tested - mocked http response returns immediately
+            # cannot be tested - mocked http response returns immediately
             if self._loading:
                 _LOGGER.debug("already loading - waiting for notification")
                 await self._condition.wait()
@@ -211,13 +184,3 @@ class BuienradarCam(Camera):
             async with self._condition:
                 self._loading = False
                 self._condition.notify_all()
-
-    @property
-    def unique_id(self):
-        """Return the unique id."""
-        return self._unique_id
-
-    @property
-    def entity_registry_enabled_default(self) -> bool:
-        """Disable entity by default."""
-        return False

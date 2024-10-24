@@ -1,63 +1,59 @@
 """Utilities to help convert mp4s to fmp4s."""
-import io
+
+from __future__ import annotations
+
+from collections.abc import Generator
+from typing import TYPE_CHECKING
+
+from homeassistant.exceptions import HomeAssistantError
+
+from .core import Orientation
+
+if TYPE_CHECKING:
+    from io import BufferedIOBase
 
 
-def find_box(segment: io.BytesIO, target_type: bytes, box_start: int = 0) -> int:
-    """Find location of first box (or sub_box if box_start provided) of given type."""
+def find_box(
+    mp4_bytes: bytes, target_type: bytes, box_start: int = 0
+) -> Generator[int]:
+    """Find location of first box (or sub box if box_start provided) of given type."""
     if box_start == 0:
-        box_end = segment.seek(0, io.SEEK_END)
-        segment.seek(0)
         index = 0
+        box_end = len(mp4_bytes)
     else:
-        segment.seek(box_start)
-        box_end = box_start + int.from_bytes(segment.read(4), byteorder="big")
+        box_end = box_start + int.from_bytes(
+            mp4_bytes[box_start : box_start + 4], byteorder="big"
+        )
         index = box_start + 8
     while 1:
         if index > box_end - 8:  # End of box, not found
             break
-        segment.seek(index)
-        box_header = segment.read(8)
+        box_header = mp4_bytes[index : index + 8]
         if box_header[4:8] == target_type:
             yield index
-            segment.seek(index)
         index += int.from_bytes(box_header[0:4], byteorder="big")
 
 
-def get_init(segment: io.BytesIO) -> bytes:
-    """Get init section from fragmented mp4."""
-    moof_location = next(find_box(segment, b"moof"))
-    segment.seek(0)
-    return segment.read(moof_location)
-
-
-def get_m4s(segment: io.BytesIO, sequence: int) -> bytes:
-    """Get m4s section from fragmented mp4."""
-    moof_location = next(find_box(segment, b"moof"))
-    mfra_location = next(find_box(segment, b"mfra"))
-    segment.seek(moof_location)
-    return segment.read(mfra_location - moof_location)
-
-
-def get_codec_string(segment: io.BytesIO) -> str:
+def get_codec_string(mp4_bytes: bytes) -> str:
     """Get RFC 6381 codec string."""
     codecs = []
 
     # Find moov
-    moov_location = next(find_box(segment, b"moov"))
+    moov_location = next(find_box(mp4_bytes, b"moov"))
 
     # Find tracks
-    for trak_location in find_box(segment, b"trak", moov_location):
+    for trak_location in find_box(mp4_bytes, b"trak", moov_location):
         # Drill down to media info
-        mdia_location = next(find_box(segment, b"mdia", trak_location))
-        minf_location = next(find_box(segment, b"minf", mdia_location))
-        stbl_location = next(find_box(segment, b"stbl", minf_location))
-        stsd_location = next(find_box(segment, b"stsd", stbl_location))
+        mdia_location = next(find_box(mp4_bytes, b"mdia", trak_location))
+        minf_location = next(find_box(mp4_bytes, b"minf", mdia_location))
+        stbl_location = next(find_box(mp4_bytes, b"stbl", minf_location))
+        stsd_location = next(find_box(mp4_bytes, b"stsd", stbl_location))
 
         # Get stsd box
-        segment.seek(stsd_location)
-        stsd_length = int.from_bytes(segment.read(4), byteorder="big")
-        segment.seek(stsd_location)
-        stsd_box = segment.read(stsd_length)
+        stsd_length = int.from_bytes(
+            mp4_bytes[stsd_location : stsd_location + 4], byteorder="big"
+        )
+        stsd_box = mp4_bytes[stsd_location : stsd_location + stsd_length]
 
         # Base Codec
         codec = stsd_box[20:24].decode("utf-8")
@@ -96,7 +92,7 @@ def get_codec_string(segment: io.BytesIO) -> str:
                 stsd_box[112:116], byteorder="big"
             )
             reverse = 0
-            for i in range(0, 32):
+            for i in range(32):
                 reverse |= general_profile_compatibility & 1
                 if i == 31:
                     break
@@ -148,3 +144,74 @@ def get_codec_string(segment: io.BytesIO) -> str:
         codecs.append(codec)
 
     return ",".join(codecs)
+
+
+def find_moov(mp4_io: BufferedIOBase) -> int:
+    """Find location of moov atom in a BufferedIOBase mp4."""
+    index = 0
+    # Ruff doesn't understand this loop - the exception is always raised at the end
+    while 1:  # noqa: RET503
+        mp4_io.seek(index)
+        box_header = mp4_io.read(8)
+        if len(box_header) != 8 or box_header[0:4] == b"\x00\x00\x00\x00":
+            raise HomeAssistantError("moov atom not found")
+        if box_header[4:8] == b"moov":
+            return index
+        index += int.from_bytes(box_header[0:4], byteorder="big")
+
+
+def read_init(bytes_io: BufferedIOBase) -> bytes:
+    """Read the init from a mp4 file."""
+    moov_loc = find_moov(bytes_io)
+    bytes_io.seek(moov_loc)
+    moov_len = int.from_bytes(bytes_io.read(4), byteorder="big")
+    bytes_io.seek(0)
+    return bytes_io.read(moov_loc + moov_len)
+
+
+ZERO32 = b"\x00\x00\x00\x00"
+ONE32 = b"\x00\x01\x00\x00"
+NEGONE32 = b"\xff\xff\x00\x00"
+XYW_ROW = ZERO32 + ZERO32 + b"\x40\x00\x00\x00"
+ROTATE_RIGHT = (ZERO32 + ONE32 + ZERO32) + (NEGONE32 + ZERO32 + ZERO32)
+ROTATE_LEFT = (ZERO32 + NEGONE32 + ZERO32) + (ONE32 + ZERO32 + ZERO32)
+ROTATE_180 = (NEGONE32 + ZERO32 + ZERO32) + (ZERO32 + NEGONE32 + ZERO32)
+MIRROR = (NEGONE32 + ZERO32 + ZERO32) + (ZERO32 + ONE32 + ZERO32)
+FLIP = (ONE32 + ZERO32 + ZERO32) + (ZERO32 + NEGONE32 + ZERO32)
+# The two below do not seem to get applied properly
+ROTATE_LEFT_FLIP = (ZERO32 + NEGONE32 + ZERO32) + (NEGONE32 + ZERO32 + ZERO32)
+ROTATE_RIGHT_FLIP = (ZERO32 + ONE32 + ZERO32) + (ONE32 + ZERO32 + ZERO32)
+
+TRANSFORM_MATRIX_TOP = (
+    # The index into this tuple corresponds to the EXIF orientation tag
+    # Only index values of 2 through 8 are used
+    # The first two entries are just to keep everything aligned
+    b"",  # 0
+    b"",  # 1
+    MIRROR,  # 2
+    ROTATE_180,  # 3
+    FLIP,  # 4
+    ROTATE_LEFT_FLIP,  # 5
+    ROTATE_LEFT,  # 6
+    ROTATE_RIGHT_FLIP,  # 7
+    ROTATE_RIGHT,  # 8
+)
+
+
+def transform_init(init: bytes, orientation: Orientation) -> bytes:
+    """Change the transformation matrix in the header."""
+    if orientation == Orientation.NO_TRANSFORM:
+        return init
+    # Find moov
+    moov_location = next(find_box(init, b"moov"))
+    mvhd_location = next(find_box(init, b"trak", moov_location))
+    tkhd_location = next(find_box(init, b"tkhd", mvhd_location))
+    tkhd_length = int.from_bytes(
+        init[tkhd_location : tkhd_location + 4], byteorder="big"
+    )
+    return (
+        init[: tkhd_location + tkhd_length - 44]
+        + TRANSFORM_MATRIX_TOP[orientation]
+        + XYW_ROW
+        + init[tkhd_location + tkhd_length - 8 :]
+    )

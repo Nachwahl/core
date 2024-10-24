@@ -1,15 +1,26 @@
 """Constants for Bravia TV integration."""
-ATTR_CID = "cid"
-ATTR_MAC = "macAddr"
-ATTR_MANUFACTURER = "Sony"
-ATTR_MODEL = "model"
 
-CONF_IGNORED_SOURCES = "ignored_sources"
+from __future__ import annotations
 
-BRAVIARC = "braviarc"
-BRAVIA_CONFIG_FILE = "bravia.conf"
-CLIENTID_PREFIX = "HomeAssistant"
-DEFAULT_NAME = f"{ATTR_MANUFACTURER} Bravia TV"
-DOMAIN = "braviatv"
-NICKNAME = "Home Assistant"
-UNDO_UPDATE_LISTENER = "undo_update_listener"
+from enum import StrEnum
+from typing import Final
+
+ATTR_CID: Final = "cid"
+ATTR_MAC: Final = "macAddr"
+ATTR_MANUFACTURER: Final = "Sony"
+ATTR_MODEL: Final = "model"
+
+CONF_NICKNAME: Final = "nickname"
+CONF_USE_PSK: Final = "use_psk"
+
+DOMAIN: Final = "braviatv"
+LEGACY_CLIENT_ID: Final = "HomeAssistant"
+NICKNAME_PREFIX: Final = "Home Assistant"
+
+
+class SourceType(StrEnum):
+    """Source type for Sony TV Integration."""
+
+    APP = "app"
+    CHANNEL = "channel"
+    INPUT = "input"

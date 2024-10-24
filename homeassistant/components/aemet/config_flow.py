@@ -1,18 +1,40 @@
 """Config flow for AEMET OpenData."""
-from aemet_opendata import AEMET
+
+from __future__ import annotations
+
+from typing import Any
+
+from aemet_opendata.exceptions import AuthError
+from aemet_opendata.interface import AEMET, ConnectionOptions
 import voluptuous as vol
 
-from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry, ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_API_KEY, CONF_LATITUDE, CONF_LONGITUDE, CONF_NAME
-import homeassistant.helpers.config_validation as cv
+from homeassistant.core import callback
+from homeassistant.helpers import aiohttp_client, config_validation as cv
+from homeassistant.helpers.schema_config_entry_flow import (
+    SchemaFlowFormStep,
+    SchemaOptionsFlowHandler,
+)
 
-from .const import DEFAULT_NAME, DOMAIN
+from .const import CONF_STATION_UPDATES, DEFAULT_NAME, DOMAIN
+
+OPTIONS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_STATION_UPDATES, default=True): bool,
+    }
+)
+OPTIONS_FLOW = {
+    "init": SchemaFlowFormStep(OPTIONS_SCHEMA),
+}
 
 
-class AemetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class AemetConfigFlow(ConfigFlow, domain=DOMAIN):
     """Config flow for AEMET OpenData."""
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         """Handle a flow initialized by the user."""
         errors = {}
 
@@ -23,8 +45,11 @@ class AemetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"{latitude}-{longitude}")
             self._abort_if_unique_id_configured()
 
-            api_online = await _is_aemet_api_online(self.hass, user_input[CONF_API_KEY])
-            if not api_online:
+            options = ConnectionOptions(user_input[CONF_API_KEY], False)
+            aemet = AEMET(aiohttp_client.async_get_clientsession(self.hass), options)
+            try:
+                await aemet.select_coordinates(latitude, longitude)
+            except AuthError:
                 errors["base"] = "invalid_api_key"
 
             if not errors:
@@ -47,9 +72,10 @@ class AemetConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
-
-async def _is_aemet_api_online(hass, api_key):
-    aemet = AEMET(api_key)
-    return await hass.async_add_executor_job(
-        aemet.get_conventional_observation_stations, False
-    )
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> SchemaOptionsFlowHandler:
+        """Get the options flow for this handler."""
+        return SchemaOptionsFlowHandler(config_entry, OPTIONS_FLOW)
